@@ -13,24 +13,11 @@
 </head>
 <body>
   <!--
-    Load MediaPipe Tasks Vision as a proper ES module (vision_bundle.mjs)
-    and pin the classes onto window so that dart:js_interop @JS() annotations
-    can find them as globals.
-
-    NOTE: vision_bundle.js (UMD) is intentionally NOT used here. Flutter's
-    compiled JS output triggers the CommonJS branch of the UMD factory, which
-    assigns exports to module.exports instead of window, leaving FilesetResolver
-    and HandLandmarker undefined in the browser global scope.
-
-    type="module" scripts are deferred — GestureInputSource.initialize() polls
-    window.FilesetResolver until it appears (usually < 200 ms after load).
+    MediaPipe Tasks Vision is loaded entirely inside hand_tracker_worker.js
+    (a module web worker). The main thread does not import it, so there is no
+    UMD/CommonJS global-assignment problem and inference never blocks Flutter's
+    UI thread.
   -->
-  <script type="module">
-    import { FilesetResolver, HandLandmarker }
-      from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/vision_bundle.mjs';
-    window.FilesetResolver = FilesetResolver;
-    window.HandLandmarker = HandLandmarker;
-  </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

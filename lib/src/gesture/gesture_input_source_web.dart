@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
 import 'dart:math' as math;
 import 'dart:ui_web' as ui_web;
 
@@ -55,11 +56,33 @@ final class GestureInputSource implements CanvasInputSource {
 
   void updateCanvasSize(Size size) => _canvasSize = size;
 
+  /// Returns true once window.FilesetResolver has been set by the
+  /// type="module" script in index.html.
+  bool _isMediaPipeLoaded() =>
+      (web.window as JSObject).getProperty<JSAny?>('FilesetResolver'.toJS) !=
+      null;
+
   Future<void> initialize() async {
     if (_initialized || _disposed) return;
     _initialized = true;
 
     try {
+      // vision_bundle.mjs is loaded via <script type="module"> which is
+      // deferred — it may not have executed yet when didChangeDependencies
+      // fires. Poll until window.FilesetResolver appears (typically < 200 ms).
+      const timeout = Duration(seconds: 15);
+      final deadline = DateTime.now().add(timeout);
+      while (!_isMediaPipeLoaded()) {
+        if (_disposed) return;
+        if (DateTime.now().isAfter(deadline)) {
+          throw StateError(
+            'MediaPipe tasks-vision did not load within 15 s. '
+            'Ensure vision_bundle.mjs is imported in web/index.html.',
+          );
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+
       final vision =
           await FilesetResolver.forVisionTasks(_kWasmPath.toJS).toDart;
       if (_disposed) return;

@@ -37,10 +37,15 @@ class _SandboxCanvasState extends State<SandboxCanvas> {
   Offset _canvasOffset = Offset.zero;
   double _scale = 1.0;
 
+  Offset? _cursorPosition;
+  bool _isDown = false;
+
   @override
   void initState() {
     super.initState();
-    _gestureSource = GestureInputSource();
+    _gestureSource = GestureInputSource(
+      onError: (e, _) => debugPrint('GestureInputSource error: $e'),
+    );
     _controller = CanvasInputController(
       sources: [MouseInputSource(), _gestureSource],
     );
@@ -58,11 +63,19 @@ class _SandboxCanvasState extends State<SandboxCanvas> {
   void _onInput(PointerInputEvent event) {
     switch (event) {
       case CanvasDownEvent(:final position):
+        setState(() {
+          _cursorPosition = position;
+          _isDown = true;
+        });
         _tryStartDrag(_toCanvas(position));
       case CanvasMoveEvent(:final position):
+        setState(() => _cursorPosition = position);
         _continueDrag(_toCanvas(position));
       case CanvasUpEvent() || CanvasTapEvent():
+        setState(() => _isDown = false);
         _endDrag();
+      case CanvasHoverEvent(:final position):
+        setState(() => _cursorPosition = position);
       case CanvasScaleEvent(:final scaleDelta, :final panDelta):
         setState(() {
           _scale = (_scale * scaleDelta).clamp(0.25, 4.0);
@@ -70,7 +83,7 @@ class _SandboxCanvasState extends State<SandboxCanvas> {
         });
       case CanvasScrollEvent(:final delta):
         setState(() => _canvasOffset -= delta * 0.5);
-      case CanvasScaleEndEvent() || CanvasHoverEvent():
+      case CanvasScaleEndEvent():
         break;
     }
   }
@@ -113,17 +126,67 @@ class _SandboxCanvasState extends State<SandboxCanvas> {
 
   @override
   Widget build(BuildContext context) => _controller.buildSurface(
-        child: ClipRect(
-          child: CustomPaint(
-            painter: _BoxesPainter(
-              boxes: _boxes,
-              offset: _canvasOffset,
-              scale: _scale,
+        child: Stack(
+          children: [
+            ClipRect(
+              child: CustomPaint(
+                painter: _BoxesPainter(
+                  boxes: _boxes,
+                  offset: _canvasOffset,
+                  scale: _scale,
+                ),
+                size: Size.infinite,
+              ),
             ),
-            size: Size.infinite,
-          ),
+            if (_cursorPosition != null)
+              Positioned(
+                left: _cursorPosition!.dx - 12,
+                top: _cursorPosition!.dy - 12,
+                child: IgnorePointer(
+                  child: _AirCursor(isDown: _isDown),
+                ),
+              ),
+          ],
         ),
       );
+}
+
+class _AirCursor extends StatelessWidget {
+  const _AirCursor({required this.isDown});
+
+  final bool isDown;
+
+  @override
+  Widget build(BuildContext context) => CustomPaint(
+        size: const Size(24, 24),
+        painter: _AirCursorPainter(isDown: isDown),
+      );
+}
+
+class _AirCursorPainter extends CustomPainter {
+  const _AirCursorPainter({required this.isDown});
+
+  final bool isDown;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final ringPaint = Paint()
+      ..color = (isDown ? Colors.redAccent : Colors.white).withValues(alpha: 0.9)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    canvas.drawCircle(center, 10, ringPaint);
+    if (isDown) {
+      canvas.drawCircle(
+        center,
+        4,
+        Paint()..color = Colors.redAccent.withValues(alpha: 0.9),
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_AirCursorPainter old) => old.isDown != isDown;
 }
 
 class _BoxesPainter extends CustomPainter {

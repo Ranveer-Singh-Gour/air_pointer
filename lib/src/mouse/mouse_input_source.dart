@@ -5,6 +5,9 @@ import 'package:air_pointer/src/events/pointer_input_event.dart';
 import 'package:flutter/gestures.dart' as flutter_gestures;
 import 'package:flutter/widgets.dart';
 
+// Distance threshold below which a press+release is treated as a tap, not a drag.
+const double _kTapSlop = 10.0;
+
 final class MouseInputSource implements CanvasInputSource {
   MouseInputSource({
     this.behavior = HitTestBehavior.opaque,
@@ -45,6 +48,7 @@ class _MouseSurfaceState extends State<_MouseSurface> {
   Offset _pinchLastFocalPoint = Offset.zero;
   bool _hasDragStarted = false;
   Offset _dragLastPosition = Offset.zero;
+  Offset _downPosition = Offset.zero;
 
   void _emit(PointerInputEvent event) => widget.sink.add(event);
 
@@ -62,10 +66,6 @@ class _MouseSurfaceState extends State<_MouseSurface> {
     }
   }
 
-  void _onTapUp(TapUpDetails details) {
-    _emit(CanvasTapEvent(position: details.localPosition));
-  }
-
   void _onScaleStart(ScaleStartDetails details) {
     if (details.pointerCount >= 2) {
       _isPinchZooming = true;
@@ -75,6 +75,7 @@ class _MouseSurfaceState extends State<_MouseSurface> {
     }
     _isPinchZooming = false;
     _hasDragStarted = true;
+    _downPosition = details.localFocalPoint;
     _dragLastPosition = details.localFocalPoint;
     _emit(CanvasDownEvent(position: details.localFocalPoint));
   }
@@ -108,7 +109,17 @@ class _MouseSurfaceState extends State<_MouseSurface> {
     }
     if (_hasDragStarted) {
       _hasDragStarted = false;
-      _emit(CanvasUpEvent(position: _dragLastPosition));
+      // Distinguish tap from drag: if total movement stayed within the slop
+      // threshold, treat it as a tap rather than a drag-end. This avoids
+      // registering TapGestureRecognizer (which would compete with
+      // ScaleGestureRecognizer in the arena and delay onScaleStart by ~18 px).
+      final wasTap =
+          (_dragLastPosition - _downPosition).distance < _kTapSlop;
+      if (wasTap) {
+        _emit(CanvasTapEvent(position: _downPosition));
+      } else {
+        _emit(CanvasUpEvent(position: _dragLastPosition));
+      }
     }
   }
 
@@ -118,7 +129,6 @@ class _MouseSurfaceState extends State<_MouseSurface> {
         onPointerSignal: _onPointerSignal,
         child: GestureDetector(
           behavior: widget.behavior,
-          onTapUp: _onTapUp,
           onScaleStart: _onScaleStart,
           onScaleUpdate: _onScaleUpdate,
           onScaleEnd: _onScaleEnd,

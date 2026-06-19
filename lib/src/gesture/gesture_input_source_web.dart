@@ -74,6 +74,8 @@ final class GestureInputSource implements CanvasInputSource {
 
       final video = web.document.createElement('video') as web.HTMLVideoElement
         ..autoplay = true
+        ..muted = true     // required by browsers to allow autoplay without user gesture
+        ..playsInline = true
         ..style.display = 'none';
       web.document.body?.appendChild(video);
       _video = video;
@@ -86,6 +88,8 @@ final class GestureInputSource implements CanvasInputSource {
       if (_disposed) return;
 
       video.srcObject = stream;
+      await video.play().toDart;  // must await — autoplay alone is not reliable
+      if (_disposed) return;
       web.window.requestAnimationFrame(_detectionLoop.toJS);
     } catch (e, st) {
       _initialized = false;
@@ -101,22 +105,32 @@ final class GestureInputSource implements CanvasInputSource {
     // Hard-stop: dispose() was called or landmarker was torn down.
     if (_disposed || _landmarker == null || _video == null) return;
 
-    final tsMs = timestamp.toDartDouble;
-    final dt =
-        _prevTimestampMs > 0 ? (tsMs - _prevTimestampMs) / 1000.0 : 1 / 30.0;
-    _prevTimestampMs = tsMs;
+    // readyState < 2 (HAVE_CURRENT_DATA) means the video has no frame yet.
+    // detectForVideo would throw, so skip and retry on the next frame.
+    if (_video!.readyState < 2) {
+      web.window.requestAnimationFrame(_detectionLoop.toJS);
+      return;
+    }
 
-    final result = _landmarker!.detectForVideo(_video!, tsMs.toInt());
-    final hands = result.landmarks;
+    try {
+      final tsMs = timestamp.toDartDouble;
+      final dt =
+          _prevTimestampMs > 0 ? (tsMs - _prevTimestampMs) / 1000.0 : 1 / 30.0;
+      _prevTimestampMs = tsMs;
 
-    if (hands.length == 0) {
-      if (_wasDown) {
-        _wasDown = false;
-        _emit(CanvasUpEvent(position: _lastEmittedPosition));
+      final result = _landmarker!.detectForVideo(_video!, tsMs.toInt());
+      final hands = result.landmarks;
+
+      if (hands.length == 0) {
+        if (_wasDown) {
+          _wasDown = false;
+          _emit(CanvasUpEvent(position: _lastEmittedPosition));
+        }
+      } else {
+        _processHand(hands[0], dt);
       }
-    } else {
-      final hand = hands[0];
-      _processHand(hand, dt);
+    } catch (_) {
+      // Detection errors are non-fatal; the rAF loop continues.
     }
 
     web.window.requestAnimationFrame(_detectionLoop.toJS);

@@ -44,9 +44,12 @@ final class HandGestureRecognizer {
     double beta = 0.05,
     Duration dwellDuration = Duration.zero,
     this.dwellRadius = 12.0,
+    bool scrollEnabled = false,
+    this.scrollScale = 3.0,
   })  : _pinchCloseThreshold = pinchCloseThreshold,
         _pinchOpenThreshold = pinchOpenThreshold,
         _dwellThresholdS = dwellDuration.inMicroseconds / 1e6,
+        _scrollEnabled = scrollEnabled,
         _xFilter = OneEuroFilter(minCutoff: minCutoff, beta: beta),
         _yFilter = OneEuroFilter(minCutoff: minCutoff, beta: beta);
 
@@ -72,6 +75,10 @@ final class HandGestureRecognizer {
   /// to accumulate. Moving beyond it resets the timer to zero.
   final double dwellRadius;
 
+  /// Multiplier applied to the raw screen-pixel delta when emitting
+  /// [CanvasScrollEvent] during a pointing-finger scroll gesture.
+  final double scrollScale;
+
   final OneEuroFilter _xFilter;
   final OneEuroFilter _yFilter;
 
@@ -80,6 +87,10 @@ final class HandGestureRecognizer {
   Offset _dwellAnchor = Offset.zero;
   double _dwellElapsedS = 0;
   bool _mustMoveBeforeDwell = false;
+
+  // Pointing-finger scroll state.
+  final bool _scrollEnabled;
+  Offset? _prevScrollPosition;  // null = first pointing frame or not pointing
 
   GesturePhase _phase = GesturePhase.lost;
   int _acquireCount = 0;
@@ -140,6 +151,7 @@ final class HandGestureRecognizer {
         secondHandLandmarks: secondOk ? secondHandLandmarks : const [],
         isTwoHandActive: _twoHandActive,
         dwellProgress: _dwellProgress,
+        isPointing: _scrollEnabled && _prevScrollPosition != null,
       ),
     );
   }
@@ -172,6 +184,7 @@ final class HandGestureRecognizer {
     _dwellAnchor = Offset.zero;
     _dwellElapsedS = 0;
     _mustMoveBeforeDwell = false;
+    _prevScrollPosition = null;
     _xFilter.reset();
     _yFilter.reset();
   }
@@ -180,6 +193,7 @@ final class HandGestureRecognizer {
     // No hand visible — stop any dwell accumulation immediately.
     _dwellElapsedS = 0;
     _mustMoveBeforeDwell = false;
+    _prevScrollPosition = null;
 
     switch (_phase) {
       case GesturePhase.lost:
@@ -259,8 +273,20 @@ final class HandGestureRecognizer {
       smoothY * canvasSize.height,
     );
 
-    // Dwell-click: fire a tap when the cursor holds still in hovering phase.
+    // Hovering: check for pointing-finger scroll, then dwell-click.
     if (_phase == GesturePhase.hovering) {
+      if (_scrollEnabled && _detectPointing(landmarks)) {
+        // Suppress dwell; reset anchor so dwell starts fresh when pointing ends.
+        _dwellAnchor = position;
+        _dwellElapsedS = 0;
+        _mustMoveBeforeDwell = false;
+        final prev = _prevScrollPosition;
+        _prevScrollPosition = position;
+        if (prev == null) return [CanvasHoverEvent(position: position)];
+        final dy = (position.dy - prev.dy) * scrollScale;
+        return [CanvasScrollEvent(position: position, delta: Offset(0, dy))];
+      }
+      _prevScrollPosition = null;
       final dwellTap = _checkDwell(position, dt);
       if (dwellTap != null) return [dwellTap];
     } else {
@@ -268,6 +294,7 @@ final class HandGestureRecognizer {
       _dwellAnchor = position;
       _dwellElapsedS = 0;
       _mustMoveBeforeDwell = false;
+      _prevScrollPosition = null;
     }
 
     // Hysteresis: different thresholds prevent chatter near the boundary.
@@ -279,6 +306,7 @@ final class HandGestureRecognizer {
       _lastPosition = position;
       _dwellElapsedS = 0;
       _mustMoveBeforeDwell = false;
+      _prevScrollPosition = null;
       return [CanvasDownEvent(position: position)];
     }
     if (_phase == GesturePhase.down &&
@@ -317,9 +345,10 @@ final class HandGestureRecognizer {
       }
       _twoHandActive = true;
       _prevSpread = 0;  // marks "first frame" — no scale emitted yet
-      // Two-hand mode is not hovering; dwell must restart when returning.
+      // Two-hand mode is not hovering; dwell and scroll must restart when returning.
       _dwellElapsedS = 0;
       _mustMoveBeforeDwell = false;
+      _prevScrollPosition = null;
     }
 
     // Use wrist of each hand for stable spread measurement.
@@ -394,5 +423,16 @@ final class HandGestureRecognizer {
   double get _dwellProgress {
     if (_dwellThresholdS <= 0 || _mustMoveBeforeDwell) return 0.0;
     return (_dwellElapsedS / _dwellThresholdS).clamp(0.0, 1.0);
+  }
+
+  // Returns true when the index finger is extended and the middle finger is
+  // curled — the pointing gesture that activates finger scroll.
+  // MediaPipe Y: 0 = top, 1 = bottom. Extended finger tip has lower Y than PIP.
+  bool _detectPointing(List<HandLandmarkPoint> landmarks) {
+    final indexTip = landmarks.getLandmark(HandLandmarkType.indexTip);
+    final indexPip = landmarks.getLandmark(HandLandmarkType.indexPip);
+    final middleTip = landmarks.getLandmark(HandLandmarkType.middleTip);
+    final middlePip = landmarks.getLandmark(HandLandmarkType.middlePip);
+    return indexTip.y < indexPip.y && middleTip.y > middlePip.y;
   }
 }

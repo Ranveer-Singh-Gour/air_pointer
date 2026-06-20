@@ -25,10 +25,14 @@ final class GestureInputSource implements CanvasInputSource {
     this.onError,
     Duration dwellDuration = Duration.zero,
     double dwellRadius = 12.0,
+    bool scrollEnabled = false,
+    double scrollScale = 3.0,
   }) {
     _recognizer = HandGestureRecognizer(
       dwellDuration: dwellDuration,
       dwellRadius: dwellRadius,
+      scrollEnabled: scrollEnabled,
+      scrollScale: scrollScale,
     );
   }
 
@@ -114,10 +118,9 @@ final class GestureInputSource implements CanvasInputSource {
 
       // Spin up the inference worker. MediaPipe is loaded inside the worker
       // (via its own ES module import) so the main thread stays clean.
-      _worker = web.Worker(
-        'hand_tracker_worker.js'.toJS,
-        web.WorkerOptions(type: 'module'),
-      );
+      // Classic worker (no type:'module') so MediaPipe's WASM runtime can
+      // call importScripts() for its internal sub-worker threads.
+      _worker = web.Worker('hand_tracker_worker.js'.toJS);
       _worker!.onmessage = _onWorkerMessage.toJS;
       _worker!.onerror = ((web.Event _) {
         const msg =
@@ -272,6 +275,7 @@ final class GestureInputSource implements CanvasInputSource {
             handedness: _parseHandedness(handednesses, 0),
             secondHandedness: _parseHandedness(handednesses, 1),
             dwellProgress: result.debug.dwellProgress,
+            isPointing: result.debug.isPointing,
             workerLatencyMs: workerLatencyMs,
             roundTripMs: roundTripMs,
           ));

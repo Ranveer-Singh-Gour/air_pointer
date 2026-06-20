@@ -31,6 +31,16 @@ final class OneEuroFilter {
     return _xFilter!.filter(value, alpha);
   }
 
+  /// Clears internal state so the next [filter] call starts fresh.
+  ///
+  /// Call this when the input signal has had a discontinuity (e.g. hand
+  /// tracking lost and reacquired) to prevent cursor warp on re-acquisition.
+  void reset() {
+    _xFilter = null;
+    _dxFilter = null;
+    _prevValue = null;
+  }
+
   static double _alpha(double cutoff, double dt) {
     final tau = 1.0 / (2 * math.pi * cutoff);
     return 1.0 / (1.0 + tau / dt);

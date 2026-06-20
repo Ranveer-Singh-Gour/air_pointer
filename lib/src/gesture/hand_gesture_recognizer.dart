@@ -1,0 +1,321 @@
+import 'dart:math' as math;
+
+import 'package:air_pointer/src/events/pointer_input_event.dart';
+import 'package:air_pointer/src/filter/one_euro_filter.dart';
+import 'package:air_pointer/src/gesture/calibration_result.dart';
+import 'package:air_pointer/src/gesture/gesture_phase.dart';
+import 'package:air_pointer/src/gesture/hand_landmark_point.dart';
+import 'package:flutter/painting.dart';
+
+/// Pure-Dart gesture state machine for MediaPipe hand landmarks.
+///
+/// Accepts one frame of landmarks at a time via [process] and returns the
+/// [PointerInputEvent]s to emit plus a [GestureDebugInfo] snapshot. The
+/// caller is responsible for driving the frame loop and converting raw
+/// JS-interop data into [HandLandmarkPoint] before passing it here.
+///
+/// Key behaviours:
+/// - **Acquisition gate**: requires [acquireFrames] consecutive frames with
+///   landmarks before the hand is considered present.
+/// - **Clutch (Midas-touch guard)**: after hand confirmation, a pinch is only
+///   accepted after the hand has first been observed open. This prevents an
+///   accidental drag when the hand enters the frame already pinched.
+/// - **Hysteresis**: pinch closes at [pinchCloseThreshold] and opens at
+///   [pinchOpenThreshold] to prevent chatter near the threshold.
+/// - **Grace window**: [graceFrames] frames without a hand before the session
+///   is declared lost; the cursor freezes during grace rather than jumping.
+/// - **Cancel on exit**: emits [CanvasCancelEvent] (not [CanvasUpEvent]) when
+///   the hand exits during an active drag so consumers can discard the action.
+/// - **Two-hand spread**: when a second hand is detected, single-hand drag is
+///   cancelled and [CanvasScaleEvent]s are emitted from the spread/pinch
+///   gesture. [CanvasScaleEndEvent] fires when the second hand leaves.
+/// - **Filter reset**: [OneEuroFilter] state is cleared on session loss, not
+///   on grace entry, so a hand returning within the grace window resumes
+///   smoothly.
+final class HandGestureRecognizer {
+  HandGestureRecognizer({
+    double pinchCloseThreshold = 0.05,
+    double pinchOpenThreshold = 0.08,
+    this.acquireFrames = 3,
+    this.graceFrames = 5,
+    this.deadzonePx = 3.0,
+    double minCutoff = 1.0,
+    double beta = 0.05,
+  })  : _pinchCloseThreshold = pinchCloseThreshold,
+        _pinchOpenThreshold = pinchOpenThreshold,
+        _xFilter = OneEuroFilter(minCutoff: minCutoff, beta: beta),
+        _yFilter = OneEuroFilter(minCutoff: minCutoff, beta: beta);
+
+  /// Normalised pinch distance (thumb–index) that closes the pinch.
+  double get pinchCloseThreshold => _pinchCloseThreshold;
+
+  /// Normalised pinch distance (thumb–index) that opens the pinch.
+  double get pinchOpenThreshold => _pinchOpenThreshold;
+
+  double _pinchCloseThreshold;
+  double _pinchOpenThreshold;
+
+  /// Consecutive frames required to confirm a newly detected hand.
+  final int acquireFrames;
+
+  /// Frames without a hand before the tracking session is declared lost.
+  final int graceFrames;
+
+  /// Minimum move distance in screen pixels before a drag event is emitted.
+  final double deadzonePx;
+
+  final OneEuroFilter _xFilter;
+  final OneEuroFilter _yFilter;
+
+  GesturePhase _phase = GesturePhase.lost;
+  int _acquireCount = 0;
+  int _graceCount = 0;
+  Offset _lastPosition = Offset.zero;
+  double _lastPinchDistance = 1.0;
+
+  // Clutch: true until the newly-confirmed hand is observed open for the
+  // first time. Prevents an immediate drag when the hand enters pinched.
+  bool _mustOpenFirst = false;
+
+  // Two-hand state.
+  bool _twoHandActive = false;
+  double _prevSpread = 0;
+  Offset _prevCentroidScreen = Offset.zero;
+
+  GesturePhase get phase => _phase;
+
+  /// Process one frame. Pass [landmarks] = null (or a list shorter than 21)
+  /// when no hand is detected this frame. [secondHandLandmarks] may be
+  /// supplied when the tracker returns two hands.
+  ({List<PointerInputEvent> events, GestureDebugInfo debug}) process({
+    required List<HandLandmarkPoint>? landmarks,
+    required double dt,
+    required Size canvasSize,
+    List<HandLandmarkPoint>? secondHandLandmarks,
+  }) {
+    final firstOk = landmarks != null && landmarks.length >= 21;
+    final secondOk =
+        secondHandLandmarks != null && secondHandLandmarks.length >= 21;
+
+    final List<PointerInputEvent> events;
+
+    if (firstOk && secondOk) {
+      events = _handleTwoHand(landmarks, secondHandLandmarks, dt, canvasSize);
+    } else {
+      // Single-hand or no-hand path. Exit two-hand mode if active.
+      final exitEvents = _twoHandActive
+          ? <PointerInputEvent>[const CanvasScaleEndEvent()]
+          : const <PointerInputEvent>[];
+      if (_twoHandActive) {
+        _twoHandActive = false;
+        _prevSpread = 0;
+        // Require open hand after two-hand gesture, same as after acquisition.
+        _mustOpenFirst = true;
+      }
+      final singleEvents =
+          firstOk ? _handleHand(landmarks, dt, canvasSize) : _handleNoHand();
+      events = [...exitEvents, ...singleEvents];
+    }
+
+    return (
+      events: events,
+      debug: GestureDebugInfo(
+        phase: _phase,
+        pinchDistance: _lastPinchDistance,
+        landmarks: firstOk ? landmarks : const [],
+        secondHandLandmarks: secondOk ? secondHandLandmarks : const [],
+        isTwoHandActive: _twoHandActive,
+      ),
+    );
+  }
+
+  /// Updates the pinch detection thresholds without resetting tracking state.
+  ///
+  /// Call this after [GestureCalibrator.compute] to apply user-specific values.
+  /// Avoid calling mid-drag; the calibration flow naturally prevents this since
+  /// it runs before the user re-enters the canvas.
+  void setThresholds(CalibrationResult result) {
+    assert(
+      result.pinchOpenThreshold > result.pinchCloseThreshold,
+      'CalibrationResult invariant violated',
+    );
+    _pinchCloseThreshold = result.pinchCloseThreshold;
+    _pinchOpenThreshold = result.pinchOpenThreshold;
+  }
+
+  /// Resets all state — equivalent to constructing a fresh instance.
+  void reset() {
+    _phase = GesturePhase.lost;
+    _acquireCount = 0;
+    _graceCount = 0;
+    _lastPosition = Offset.zero;
+    _lastPinchDistance = 1.0;
+    _mustOpenFirst = false;
+    _twoHandActive = false;
+    _prevSpread = 0;
+    _prevCentroidScreen = Offset.zero;
+    _xFilter.reset();
+    _yFilter.reset();
+  }
+
+  List<PointerInputEvent> _handleNoHand() {
+    switch (_phase) {
+      case GesturePhase.lost:
+        return const [];
+
+      case GesturePhase.acquiring:
+        _acquireCount = 0;
+        _phase = GesturePhase.lost;
+        _xFilter.reset();
+        _yFilter.reset();
+        return const [];
+
+      case GesturePhase.hovering:
+        _graceCount = 1;
+        _phase = GesturePhase.grace;
+        return const [];
+
+      case GesturePhase.down:
+        // Cancel the active drag immediately; freeze in grace until confirmed lost.
+        _graceCount = 1;
+        _phase = GesturePhase.grace;
+        return [const CanvasCancelEvent()];
+
+      case GesturePhase.grace:
+        _graceCount++;
+        if (_graceCount >= graceFrames) {
+          _phase = GesturePhase.lost;
+          // Reset filters here (not on grace entry) so a within-grace return
+          // resumes smoothly from the last valid filter state.
+          _xFilter.reset();
+          _yFilter.reset();
+        }
+        return const [];
+    }
+  }
+
+  List<PointerInputEvent> _handleHand(
+    List<HandLandmarkPoint> landmarks,
+    double dt,
+    Size canvasSize,
+  ) {
+    // Advance the acquisition counter or recover from grace.
+    if (_phase == GesturePhase.lost || _phase == GesturePhase.acquiring) {
+      _acquireCount++;
+      if (_acquireCount < acquireFrames) {
+        _phase = GesturePhase.acquiring;
+        return const [];
+      }
+      // Confirmed — begin a fresh session; require explicit open before pinch.
+      _acquireCount = 0;
+      _phase = GesturePhase.hovering;
+      _mustOpenFirst = true;
+    } else if (_phase == GesturePhase.grace) {
+      _graceCount = 0;
+      _phase = GesturePhase.hovering;  // recovered within grace window
+    }
+
+    // _phase is now guaranteed to be hovering or down.
+    final thumb = landmarks[4];  // thumb tip
+    final index = landmarks[8];  // index tip
+    final dx = thumb.x - index.x;
+    final dy = thumb.y - index.y;
+    _lastPinchDistance = math.sqrt(dx * dx + dy * dy);
+
+    // Clear the Midas-touch guard as soon as the hand is clearly open.
+    // Must happen before the pinch-close check so the guard lifts on the same
+    // frame the hand opens (e.g. open hand immediately after confirmation).
+    if (_mustOpenFirst && _lastPinchDistance > _pinchOpenThreshold) {
+      _mustOpenFirst = false;
+    }
+
+    // Smooth the index-fingertip, mirroring x for a natural front-camera view.
+    final smoothX = _xFilter.filter(1.0 - index.x, dt);
+    final smoothY = _yFilter.filter(index.y, dt);
+    final position = Offset(
+      smoothX * canvasSize.width,
+      smoothY * canvasSize.height,
+    );
+
+    // Hysteresis: different thresholds prevent chatter near the boundary.
+    // Pinch is blocked by the clutch guard until the hand opens at least once.
+    if (_phase == GesturePhase.hovering &&
+        !_mustOpenFirst &&
+        _lastPinchDistance < _pinchCloseThreshold) {
+      _phase = GesturePhase.down;
+      _lastPosition = position;
+      return [CanvasDownEvent(position: position)];
+    }
+    if (_phase == GesturePhase.down &&
+        _lastPinchDistance > _pinchOpenThreshold) {
+      _phase = GesturePhase.hovering;
+      return [CanvasUpEvent(position: _lastPosition)];
+    }
+    if (_phase == GesturePhase.down) {
+      final delta = position - _lastPosition;
+      if (delta.distance >= deadzonePx) {
+        _lastPosition = position;
+        return [CanvasMoveEvent(position: position)];
+      }
+      return const [];
+    }
+    return [CanvasHoverEvent(position: position)];
+  }
+
+  List<PointerInputEvent> _handleTwoHand(
+    List<HandLandmarkPoint> hand1,
+    List<HandLandmarkPoint> hand2,
+    double dt,
+    Size canvasSize,
+  ) {
+    final events = <PointerInputEvent>[];
+
+    if (!_twoHandActive) {
+      // Transition into two-hand mode: cancel any active drag first.
+      if (_phase == GesturePhase.down) {
+        events.add(const CanvasCancelEvent());
+        _phase = GesturePhase.hovering;
+      }
+      _twoHandActive = true;
+      _prevSpread = 0;  // marks "first frame" — no scale emitted yet
+    }
+
+    // Use wrist (landmark 0) of each hand for stable spread measurement.
+    final w1 = hand1[0];
+    final w2 = hand2[0];
+    final spreadDx = w1.x - w2.x;
+    final spreadDy = w1.y - w2.y;
+    final spread = math.sqrt(spreadDx * spreadDx + spreadDy * spreadDy);
+
+    // Centroid of the two wrists, mirrored for front-camera display.
+    // Note: pan delta from centroid drift is expected during spread/pinch
+    // gestures and is consistent with how MouseInputSource handles two-finger
+    // trackpad gestures.
+    final cx = (w1.x + w2.x) / 2;
+    final cy = (w1.y + w2.y) / 2;
+    final centroidScreen = Offset(
+      (1 - cx) * canvasSize.width,
+      cy * canvasSize.height,
+    );
+
+    if (_prevSpread < 0.001) {
+      // First two-hand frame: record baseline, emit no scale change yet.
+      _prevSpread = spread;
+      _prevCentroidScreen = centroidScreen;
+      return events;  // may contain CanvasCancelEvent from mode transition
+    }
+
+    final scaleDelta = _prevSpread > 0.001 ? spread / _prevSpread : 1.0;
+    final panDelta = centroidScreen - _prevCentroidScreen;
+    _prevSpread = spread;
+    _prevCentroidScreen = centroidScreen;
+
+    events.add(CanvasScaleEvent(
+      focalPoint: centroidScreen,
+      scaleDelta: scaleDelta,
+      panDelta: panDelta,
+    ));
+
+    return events;
+  }
+}

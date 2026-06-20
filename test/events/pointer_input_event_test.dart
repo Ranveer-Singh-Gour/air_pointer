@@ -17,6 +17,7 @@ void main() {
         CanvasScrollEvent() => 'scroll',
         CanvasScaleEvent() => 'scale',
         CanvasScaleEndEvent() => 'scaleEnd',
+        CanvasCancelEvent() => 'cancel',
       };
       expect(result, 'down');
     });

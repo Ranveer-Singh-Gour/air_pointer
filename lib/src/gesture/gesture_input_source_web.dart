@@ -1,19 +1,16 @@
 import 'dart:async';
 import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
-import 'dart:math' as math;
 import 'dart:ui_web' as ui_web;
 
 import 'package:air_pointer/src/boundary/canvas_input_source.dart';
 import 'package:air_pointer/src/events/pointer_input_event.dart';
-import 'package:air_pointer/src/filter/one_euro_filter.dart';
+import 'package:air_pointer/src/gesture/calibration_result.dart';
+import 'package:air_pointer/src/gesture/gesture_phase.dart';
+import 'package:air_pointer/src/gesture/hand_gesture_recognizer.dart';
+import 'package:air_pointer/src/gesture/hand_landmark_point.dart';
 import 'package:flutter/widgets.dart';
 import 'package:web/web.dart' as web;
-
-const double _kPinchThreshold = 0.05;
-const double _kMinCutoff = 1.0;
-const double _kBeta = 0.05;
-const double _kDeadzonePx = 3.0;
 
 // Pinned to avoid silent breakage when MediaPipe releases incompatible updates.
 const String _kMediaPipeVersion = '0.10.21';
@@ -30,6 +27,12 @@ final class GestureInputSource implements CanvasInputSource {
 
   final StreamController<PointerInputEvent> _controller =
       StreamController.broadcast();
+  final StreamController<GestureDebugInfo> _debugController =
+      StreamController.broadcast();
+
+  /// Stream of per-frame debug snapshots: gesture phase, pinch distance,
+  /// landmarks, and latency. Use this to drive a debug overlay.
+  Stream<GestureDebugInfo> get debugInfo => _debugController.stream;
 
   web.Worker? _worker;
   web.HTMLVideoElement? _video;
@@ -45,20 +48,21 @@ final class GestureInputSource implements CanvasInputSource {
   // Set while the worker is processing a frame; prevents flooding the worker.
   bool _workerBusy = false;
 
-  bool _wasDown = false;
   Size _canvasSize = Size.zero;
-  Offset _lastEmittedPosition = Offset.zero;
 
   int _frameCount = 0;
   double _prevTimestampMs = 0;
   int _lastSendMs = 0;  // wall-clock ms when the last frame was posted
 
-  final OneEuroFilter _xFilter =
-      OneEuroFilter(minCutoff: _kMinCutoff, beta: _kBeta);
-  final OneEuroFilter _yFilter =
-      OneEuroFilter(minCutoff: _kMinCutoff, beta: _kBeta);
+  final HandGestureRecognizer _recognizer = HandGestureRecognizer();
 
   void updateCanvasSize(Size size) => _canvasSize = size;
+
+  /// Applies per-user detection thresholds from a completed calibration.
+  ///
+  /// Safe to call at any time; takes effect on the next processed frame.
+  void applyCalibration(CalibrationResult result) =>
+      _recognizer.setThresholds(result);
 
   Future<void> initialize() async {
     if (_initialized || _disposed) return;
@@ -149,13 +153,44 @@ final class GestureInputSource implements CanvasInputSource {
             : 1.0 / 30.0;
         _prevTimestampMs = tsMs;
 
-        if (hands == null || hands.isEmpty) {
-          if (_wasDown) {
-            _wasDown = false;
-            _emit(CanvasUpEvent(position: _lastEmittedPosition));
+        // Convert JS-dartified hand arrays to HandLandmarkPoint lists.
+        List<HandLandmarkPoint>? lms;
+        List<HandLandmarkPoint>? secondLms;
+        if (hands != null) {
+          List<HandLandmarkPoint> parseHand(List<Object?> raw) =>
+              raw.map((pt) {
+                final m = pt as Map<Object?, Object?>;
+                return HandLandmarkPoint(
+                  (m['x'] as num).toDouble(),
+                  (m['y'] as num).toDouble(),
+                  (m['z'] as num).toDouble(),
+                );
+              }).toList();
+          if (hands.isNotEmpty) lms = parseHand(hands[0] as List<Object?>);
+          if (hands.length >= 2) {
+            secondLms = parseHand(hands[1] as List<Object?>);
           }
-        } else {
-          _processHand(hands[0] as List<Object?>, dt);
+        }
+
+        final result = _recognizer.process(
+          landmarks: lms,
+          secondHandLandmarks: secondLms,
+          dt: dt,
+          canvasSize: _canvasSize,
+        );
+        for (final e in result.events) {
+          _emit(e);
+        }
+        if (!_debugController.isClosed) {
+          _debugController.add(GestureDebugInfo(
+            phase: result.debug.phase,
+            pinchDistance: result.debug.pinchDistance,
+            landmarks: result.debug.landmarks,
+            secondHandLandmarks: result.debug.secondHandLandmarks,
+            isTwoHandActive: result.debug.isTwoHandActive,
+            workerLatencyMs: workerLatencyMs,
+            roundTripMs: roundTripMs,
+          ));
         }
 
       case 'error':
@@ -198,49 +233,6 @@ final class GestureInputSource implements CanvasInputSource {
         _workerBusy = false;  // createImageBitmap failed; release lock
       },
     );
-  }
-
-  void _processHand(List<Object?> landmarks, double dt) {
-    final thumb = landmarks[4] as Map<Object?, Object?>;
-    final index = landmarks[8] as Map<Object?, Object?>;
-
-    final tx = (thumb['x'] as num).toDouble();
-    final ty = (thumb['y'] as num).toDouble();
-    final ix = (index['x'] as num).toDouble();
-    final iy = (index['y'] as num).toDouble();
-
-    final dx = tx - ix;
-    final dy = ty - iy;
-    final pinchDist = math.sqrt(dx * dx + dy * dy);
-    final isPinched = pinchDist < _kPinchThreshold;
-
-    final rawX = 1.0 - ix;  // mirror front-camera x-axis
-    final rawY = iy;
-
-    final smoothX = _xFilter.filter(rawX, dt);
-    final smoothY = _yFilter.filter(rawY, dt);
-
-    final position = Offset(
-      smoothX * _canvasSize.width,
-      smoothY * _canvasSize.height,
-    );
-
-    if (!_wasDown && isPinched) {
-      _wasDown = true;
-      _lastEmittedPosition = position;
-      _emit(CanvasDownEvent(position: position));
-    } else if (_wasDown && !isPinched) {
-      _wasDown = false;
-      _emit(CanvasUpEvent(position: _lastEmittedPosition));
-    } else if (_wasDown) {
-      final delta = position - _lastEmittedPosition;
-      if (delta.distance >= _kDeadzonePx) {
-        _lastEmittedPosition = position;
-        _emit(CanvasMoveEvent(position: position));
-      }
-    } else {
-      _emit(CanvasHoverEvent(position: position));
-    }
   }
 
   void _setupPreview(web.MediaStream stream) {
@@ -315,6 +307,7 @@ final class GestureInputSource implements CanvasInputSource {
   @override
   void dispose() {
     _disposed = true;
+    _recognizer.reset();
     // Ask the worker to close itself gracefully, then hard-terminate.
     _worker?.postMessage({'type': 'dispose'}.jsify()!);
     _worker?.terminate();
@@ -335,6 +328,7 @@ final class GestureInputSource implements CanvasInputSource {
       video.remove();
       _video = null;
     }
+    unawaited(_debugController.close());
     unawaited(_controller.close());
   }
 }

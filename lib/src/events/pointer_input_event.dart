@@ -58,3 +58,12 @@ final class CanvasScaleEvent extends PointerInputEvent {
 final class CanvasScaleEndEvent extends PointerInputEvent {
   const CanvasScaleEndEvent();
 }
+
+/// Emitted when a drag is interrupted by an unrecoverable event (e.g. the
+/// hand tracking hand exits the camera frame mid-drag).
+///
+/// Unlike [CanvasUpEvent], cancel signals that the action should NOT be
+/// committed — consumers should roll back or discard any in-progress change.
+final class CanvasCancelEvent extends PointerInputEvent {
+  const CanvasCancelEvent();
+}

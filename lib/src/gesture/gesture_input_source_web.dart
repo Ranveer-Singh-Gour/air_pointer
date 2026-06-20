@@ -6,46 +6,68 @@ import 'dart:ui_web' as ui_web;
 import 'package:air_pointer/src/boundary/canvas_input_source.dart';
 import 'package:air_pointer/src/events/pointer_input_event.dart';
 import 'package:air_pointer/src/gesture/calibration_result.dart';
+import 'package:air_pointer/src/gesture/gesture_classifier.dart';
 import 'package:air_pointer/src/gesture/gesture_phase.dart';
 import 'package:air_pointer/src/gesture/hand_gesture_recognizer.dart';
 import 'package:air_pointer/src/gesture/hand_landmark_point.dart';
+import 'package:air_pointer/src/gesture/hand_tracking_status.dart';
 import 'package:flutter/widgets.dart';
 import 'package:web/web.dart' as web;
 
 // Pinned to avoid silent breakage when MediaPipe releases incompatible updates.
 const String _kMediaPipeVersion = '0.10.21';
-const String _kWasmPath =
-    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@$_kMediaPipeVersion/wasm';
-const String _kModelPath =
+const String _kMediaPipeBase =
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@$_kMediaPipeVersion';
+const String _kModelUrl =
     'https://storage.googleapis.com/mediapipe-models/'
     'hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
 final class GestureInputSource implements CanvasInputSource {
   GestureInputSource({
     this.onError,
+    this.mediaPipeBaseUrl,
+    this.modelAssetUrl,
     Duration dwellDuration = Duration.zero,
     double dwellRadius = 12.0,
     bool scrollEnabled = false,
     double scrollScale = 3.0,
+    Duration predictionHorizon = Duration.zero,
   }) {
     _recognizer = HandGestureRecognizer(
       dwellDuration: dwellDuration,
       dwellRadius: dwellRadius,
       scrollEnabled: scrollEnabled,
       scrollScale: scrollScale,
+      predictionHorizon: predictionHorizon,
     );
   }
 
   final void Function(Object, StackTrace)? onError;
 
+  /// Base URL for the MediaPipe ESM bundle and WASM runtime. When null, the
+  /// package CDN is used. Set to a local path (e.g. `'/mediapipe'`) to
+  /// self-host the runtime and enable offline use. The bundle is expected at
+  /// `<base>/vision_bundle.mjs` and the WASM files at `<base>/wasm/`.
+  final String? mediaPipeBaseUrl;
+
+  /// URL for the `hand_landmarker.task` model file. When null, the Google
+  /// Cloud Storage default is used. Set to a local path (e.g.
+  /// `'/mediapipe/models/hand_landmarker.task'`) to self-host the model.
+  final String? modelAssetUrl;
+
   final StreamController<PointerInputEvent> _controller =
       StreamController.broadcast();
   final StreamController<GestureDebugInfo> _debugController =
+      StreamController.broadcast();
+  final StreamController<HandTrackingStatus> _statusController =
       StreamController.broadcast();
 
   /// Stream of per-frame debug snapshots: gesture phase, pinch distance,
   /// landmarks, and latency. Use this to drive a debug overlay.
   Stream<GestureDebugInfo> get debugInfo => _debugController.stream;
+
+  /// Lifecycle stream: initializing → cameraReady → tracking ⇄ lost → error.
+  Stream<HandTrackingStatus> get statusStream => _statusController.stream;
 
   web.Worker? _worker;
   web.HTMLVideoElement? _video;
@@ -57,6 +79,8 @@ final class GestureInputSource implements CanvasInputSource {
 
   bool _initialized = false;
   bool _disposed = false;
+  bool _wasTracking = false;
+  bool _hasErrored = false;
 
   // Set while the worker is processing a frame; prevents flooding the worker.
   bool _workerBusy = false;
@@ -83,6 +107,9 @@ final class GestureInputSource implements CanvasInputSource {
   Future<void> initialize() async {
     if (_initialized || _disposed) return;
     _initialized = true;
+    _hasErrored = false;
+    _wasTracking = false;
+    _emitStatus(const HandTrackingInitializing());
 
     // Fast-fail for insecure context before attempting getUserMedia. Browsers
     // block camera access on plain HTTP outside localhost.
@@ -92,6 +119,8 @@ final class GestureInputSource implements CanvasInputSource {
         'Camera not available — serve the page over HTTPS or localhost.',
       );
       if (!_cameraReady.isCompleted) _cameraReady.completeError(err);
+      _hasErrored = true;
+      _emitStatus(HandTrackingError(err));
       onError?.call(err, StackTrace.current);
       return;
     }
@@ -133,17 +162,24 @@ final class GestureInputSource implements CanvasInputSource {
         } else {
           detail = 'unknown error';
         }
-        onError?.call(
-          StateError(
-            'hand_tracker_worker.js failed to load or threw an uncaught error. $detail',
-          ),
-          StackTrace.current,
+        final err = StateError(
+          'hand_tracker_worker.js failed to load or threw an uncaught error. $detail',
         );
+        if (!_hasErrored) {
+          _hasErrored = true;
+          _emitStatus(HandTrackingError(err));
+        }
+        onError?.call(err, StackTrace.current);
       }).toJS;
 
+      final base = mediaPipeBaseUrl ?? _kMediaPipeBase;
       _worker!.postMessage(
-        {'type': 'init', 'wasmPath': _kWasmPath, 'modelPath': _kModelPath}
-            .jsify()!,
+        {
+          'type': 'init',
+          'bundleUrl': '$base/vision_bundle.mjs',
+          'wasmFolderUrl': '$base/wasm',
+          'modelUrl': modelAssetUrl ?? _kModelUrl,
+        }.jsify()!,
       );
       // The rAF capture loop starts when the worker posts 'ready'.
     } catch (e, st) {
@@ -154,6 +190,10 @@ final class GestureInputSource implements CanvasInputSource {
       _video = null;
       final categorized = _categorizeCameraError(e);
       if (!_cameraReady.isCompleted) _cameraReady.completeError(categorized, st);
+      if (!_hasErrored) {
+        _hasErrored = true;
+        _emitStatus(HandTrackingError(categorized));
+      }
       onError?.call(categorized, st);
     }
   }
@@ -172,7 +212,7 @@ final class GestureInputSource implements CanvasInputSource {
     if (rawMsg.contains('Content-Security-Policy') ||
         rawMsg.contains("'unsafe-eval'")) {
       return 'MediaPipe blocked by Content-Security-Policy — add '
-          "'script-src cdn.jsdelivr.net' and 'wasm-unsafe-eval' to your CSP.";
+          "'wasm-unsafe-eval' to your CSP script-src directive.";
     }
     // CORS rejection when serving the worker script from a different origin.
     if (rawMsg.contains('CORS') || rawMsg.contains('cross-origin')) {
@@ -224,6 +264,7 @@ final class GestureInputSource implements CanvasInputSource {
     switch (type) {
       case 'ready':
         // Worker finished loading MediaPipe — start capturing frames.
+        _emitStatus(const HandTrackingCameraReady());
         web.window.requestAnimationFrame(_captureLoopJS);
 
       case 'landmarks':
@@ -278,6 +319,16 @@ final class GestureInputSource implements CanvasInputSource {
         for (final e in result.events) {
           _emit(e);
         }
+        if (!_hasErrored) {
+          final nowTracking = result.debug.phase == GesturePhase.hovering ||
+              result.debug.phase == GesturePhase.down;
+          if (!_wasTracking && nowTracking) {
+            _emitStatus(const HandTrackingTracking());
+          } else if (_wasTracking && !nowTracking) {
+            _emitStatus(const HandTrackingLost());
+          }
+          _wasTracking = nowTracking;
+        }
         if (!_debugController.isClosed) {
           _debugController.add(GestureDebugInfo(
             phase: result.debug.phase,
@@ -287,6 +338,8 @@ final class GestureInputSource implements CanvasInputSource {
             isTwoHandActive: result.debug.isTwoHandActive,
             handedness: _parseHandedness(handednesses, 0),
             secondHandedness: _parseHandedness(handednesses, 1),
+            detectedGesture: classifyGesture(lms),
+            secondHandGesture: classifyGesture(secondLms),
             dwellProgress: result.debug.dwellProgress,
             isPointing: result.debug.isPointing,
             workerLatencyMs: workerLatencyMs,
@@ -297,10 +350,12 @@ final class GestureInputSource implements CanvasInputSource {
       case 'error':
         final rawMsg = raw['message'] as String? ?? 'unknown error';
         debugPrint('[air_pointer] MediaPipe init error: $rawMsg');
-        onError?.call(
-          StateError(_categorizeWorkerError(rawMsg)),
-          StackTrace.current,
-        );
+        final workerErr = StateError(_categorizeWorkerError(rawMsg));
+        if (!_hasErrored) {
+          _hasErrored = true;
+          _emitStatus(HandTrackingError(workerErr));
+        }
+        onError?.call(workerErr, StackTrace.current);
 
       case 'init_error': // reserved for future typed worker errors
         break;
@@ -414,6 +469,10 @@ final class GestureInputSource implements CanvasInputSource {
     if (!_controller.isClosed) _controller.add(event);
   }
 
+  void _emitStatus(HandTrackingStatus status) {
+    if (!_statusController.isClosed) _statusController.add(status);
+  }
+
   @override
   Stream<PointerInputEvent> get events => _controller.stream;
 
@@ -444,6 +503,7 @@ final class GestureInputSource implements CanvasInputSource {
       video.remove();
       _video = null;
     }
+    unawaited(_statusController.close());
     unawaited(_debugController.close());
     unawaited(_controller.close());
   }

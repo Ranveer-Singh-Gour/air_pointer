@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:air_pointer/src/events/pointer_input_event.dart';
 import 'package:air_pointer/src/gesture/gesture_phase.dart';
 import 'package:air_pointer/src/gesture/hand_gesture_recognizer.dart';
@@ -586,6 +588,165 @@ void main() {
         canvasSize: _size,
       );
       expect(result.events.first, isA<CanvasHoverEvent>());
+    });
+  });
+
+  group('velocity prediction', () {
+    // Helper: advance a confirmed recognizer through N frames with a moving
+    // index finger and return the last hover position.
+    Offset driveMoving(HandGestureRecognizer r, {required int frames}) {
+      for (var i = 0; i < frames; i++) {
+        final x = 0.6 - i * 0.01;  // decreasing index.x → mirrored screen-x increases
+        r.process(
+          landmarks: _open(indexX: x.clamp(0.0, 1.0)),
+          dt: _dt,
+          canvasSize: _size,
+        );
+      }
+      final last = r.process(
+        landmarks: _open(indexX: (0.6 - frames * 0.01).clamp(0.0, 1.0)),
+        dt: _dt,
+        canvasSize: _size,
+      );
+      return (last.events.whereType<CanvasHoverEvent>().first).position;
+    }
+
+    test('zero prediction horizon — position identical to unaugmented output', () {
+      // With no motion (static landmarks), a 50ms-prediction recognizer and a
+      // default recognizer should converge to the same position because velocity ≈ 0.
+      final rBase = _confirmed();
+      final rPred = HandGestureRecognizer(
+        predictionHorizon: const Duration(milliseconds: 50),
+      );
+      _run(rPred, [_open(), _open(), _open()]);
+
+      // 30 static frames — both filters settle; velocity → 0.
+      for (var i = 0; i < 30; i++) {
+        rBase.process(landmarks: _open(), dt: _dt, canvasSize: _size);
+        rPred.process(landmarks: _open(), dt: _dt, canvasSize: _size);
+      }
+      final baseResult =
+          rBase.process(landmarks: _open(), dt: _dt, canvasSize: _size);
+      final predResult =
+          rPred.process(landmarks: _open(), dt: _dt, canvasSize: _size);
+
+      final basePos = baseResult.events.whereType<CanvasHoverEvent>().first.position;
+      final predPos = predResult.events.whereType<CanvasHoverEvent>().first.position;
+      // Static signal → zero velocity → prediction adds nothing.
+      expect(predPos.dx, closeTo(basePos.dx, 1.0));
+      expect(predPos.dy, closeTo(basePos.dy, 1.0));
+    });
+
+    test('moving right — predicted cursor leads filtered cursor in x', () {
+      final rBase = _confirmed();
+      final rPred = HandGestureRecognizer(
+        predictionHorizon: const Duration(milliseconds: 50),
+      );
+      _run(rPred, [_open(), _open(), _open()]);
+
+      final basePos = driveMoving(rBase, frames: 20);
+      final predPos = driveMoving(rPred, frames: 20);
+
+      // Positive x-velocity (moving right on screen) → predicted dx is larger.
+      expect(predPos.dx, greaterThan(basePos.dx));
+    });
+
+    test('prediction clamps — cursor stays within canvas bounds at extreme velocity',
+        () {
+      final r = HandGestureRecognizer(
+        predictionHorizon: const Duration(milliseconds: 200),
+      );
+      _run(r, [_open(), _open(), _open()]);
+
+      // Drive hard toward the right edge (indexX → 0.0 → mirrored x → 1.0).
+      for (var i = 0; i < 40; i++) {
+        final x = (0.5 - i * 0.015).clamp(0.0, 1.0);
+        r.process(
+          landmarks: _open(indexX: x),
+          dt: _dt,
+          canvasSize: _size,
+        );
+      }
+      final result = r.process(
+        landmarks: _open(indexX: 0.0),
+        dt: _dt,
+        canvasSize: _size,
+      );
+      for (final event in result.events.whereType<CanvasHoverEvent>()) {
+        expect(event.position.dx, inInclusiveRange(0.0, _size.width));
+        expect(event.position.dy, inInclusiveRange(0.0, _size.height));
+      }
+    });
+  });
+
+  group('rotation gesture', () {
+    // Drive three frames of two-hand data through a confirmed recognizer and
+    // return the CanvasScaleEvent from the third frame (the first emitting frame).
+    CanvasScaleEvent driveRotation(
+      HandGestureRecognizer r, {
+      required double w1x1, required double w1y1,  // frame 2 (baseline) hand1
+      required double w2x1, required double w2y1,  // frame 2 (baseline) hand2
+      required double w1x2, required double w1y2,  // frame 3 (event)    hand1
+      required double w2x2, required double w2y2,  // frame 3 (event)    hand2
+    }) {
+      // Frame 1: two-hand transition (any position, no event emitted yet).
+      r.process(
+        landmarks: _handAt(w1x1, w1y1),
+        secondHandLandmarks: _handAt(w2x1, w2y1),
+        dt: _dt,
+        canvasSize: _size,
+      );
+      // Frame 2: baseline — angle recorded as _prevAngle.
+      r.process(
+        landmarks: _handAt(w1x1, w1y1),
+        secondHandLandmarks: _handAt(w2x1, w2y1),
+        dt: _dt,
+        canvasSize: _size,
+      );
+      // Frame 3: emit rotation delta.
+      final result = r.process(
+        landmarks: _handAt(w1x2, w1y2),
+        secondHandLandmarks: _handAt(w2x2, w2y2),
+        dt: _dt,
+        canvasSize: _size,
+      );
+      return result.events.whereType<CanvasScaleEvent>().first;
+    }
+
+    test('rotation delta is zero when wrists stay horizontal', () {
+      final r = _confirmed();
+      final scale = driveRotation(
+        r,
+        w1x1: 0.7, w1y1: 0.5, w2x1: 0.3, w2y1: 0.5,
+        w1x2: 0.7, w1y2: 0.5, w2x2: 0.3, w2y2: 0.5,
+      );
+      expect(scale.rotation, closeTo(0.0, 1e-9));
+    });
+
+    test('clockwise rotation yields positive delta', () {
+      final r = _confirmed();
+      // Baseline: vector (hand1→hand2) points right (angle = 0).
+      // Frame 3: hand1 drops (y↑), hand2 rises (y↓) → clockwise on screen.
+      final scale = driveRotation(
+        r,
+        w1x1: 0.7, w1y1: 0.5, w2x1: 0.3, w2y1: 0.5,
+        w1x2: 0.7, w1y2: 0.56, w2x2: 0.3, w2y2: 0.44,
+      );
+      expect(scale.rotation, greaterThan(0.0));
+    });
+
+    test('rotation wraps correctly across ±π boundary', () {
+      final r = _confirmed();
+      // Baseline: vector points slightly above-left → angle ≈ −π + ε.
+      // Frame 3:  vector points slightly below-left → angle ≈ +π − ε.
+      // Raw delta ≈ +2π; wrapped → small negative (tiny CCW nudge, not ±2π).
+      final scale = driveRotation(
+        r,
+        w1x1: 0.2, w1y1: 0.495, w2x1: 0.8, w2y1: 0.505,
+        w1x2: 0.2, w1y2: 0.505, w2x2: 0.8, w2y2: 0.495,
+      );
+      expect(scale.rotation, lessThan(0.0));
+      expect(scale.rotation.abs(), lessThan(math.pi));
     });
   });
 }

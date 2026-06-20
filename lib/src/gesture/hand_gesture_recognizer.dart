@@ -46,9 +46,11 @@ final class HandGestureRecognizer {
     this.dwellRadius = 12.0,
     bool scrollEnabled = false,
     this.scrollScale = 3.0,
+    Duration predictionHorizon = Duration.zero,
   })  : _pinchCloseThreshold = pinchCloseThreshold,
         _pinchOpenThreshold = pinchOpenThreshold,
         _dwellThresholdS = dwellDuration.inMicroseconds / 1e6,
+        _predictionHorizonS = predictionHorizon.inMicroseconds / 1e6,
         _scrollEnabled = scrollEnabled,
         _xFilter = OneEuroFilter(minCutoff: minCutoff, beta: beta),
         _yFilter = OneEuroFilter(minCutoff: minCutoff, beta: beta);
@@ -84,6 +86,7 @@ final class HandGestureRecognizer {
 
   // Dwell-click state.
   final double _dwellThresholdS;  // 0 = dwell disabled
+  final double _predictionHorizonS;  // 0 = prediction disabled
   Offset _dwellAnchor = Offset.zero;
   double _dwellElapsedS = 0;
   bool _mustMoveBeforeDwell = false;
@@ -107,6 +110,7 @@ final class HandGestureRecognizer {
   bool _twoHandActive = false;
   double _prevSpread = 0;
   Offset _prevCentroidScreen = Offset.zero;
+  double _prevAngle = 0.0;
 
   GesturePhase get phase => _phase;
 
@@ -182,6 +186,7 @@ final class HandGestureRecognizer {
     _twoHandActive = false;
     _prevSpread = 0;
     _prevCentroidScreen = Offset.zero;
+    _prevAngle = 0.0;
     _dwellAnchor = Offset.zero;
     _dwellElapsedS = 0;
     _mustMoveBeforeDwell = false;
@@ -271,9 +276,20 @@ final class HandGestureRecognizer {
     // Smooth the index-fingertip, mirroring x for a natural front-camera view.
     final smoothX = _xFilter.filter(1.0 - index.x, dt);
     final smoothY = _yFilter.filter(index.y, dt);
+
+    // Velocity prediction: project the smoothed position forward by
+    // _predictionHorizonS to compensate for the lag the filter introduces.
+    // Clamp to [0,1] so the cursor cannot be predicted off-screen.
+    final predX = _predictionHorizonS > 0
+        ? (smoothX + _xFilter.velocity * _predictionHorizonS).clamp(0.0, 1.0)
+        : smoothX;
+    final predY = _predictionHorizonS > 0
+        ? (smoothY + _yFilter.velocity * _predictionHorizonS).clamp(0.0, 1.0)
+        : smoothY;
+
     final position = Offset(
-      smoothX * canvasSize.width,
-      smoothY * canvasSize.height,
+      predX * canvasSize.width,
+      predY * canvasSize.height,
     );
 
     // Hovering: pinch checked first (beats scroll), then pointing scroll, then dwell.
@@ -366,6 +382,7 @@ final class HandGestureRecognizer {
     final spreadDx = w1.x - w2.x;
     final spreadDy = w1.y - w2.y;
     final spread = math.sqrt(spreadDx * spreadDx + spreadDy * spreadDy);
+    final angle = math.atan2(spreadDy, spreadDx);
 
     // Centroid of the two wrists, mirrored for front-camera display.
     // Note: pan delta from centroid drift is expected during spread/pinch
@@ -382,18 +399,27 @@ final class HandGestureRecognizer {
       // First two-hand frame: record baseline, emit no scale change yet.
       _prevSpread = spread;
       _prevCentroidScreen = centroidScreen;
+      _prevAngle = angle;
       return events;  // may contain CanvasCancelEvent from mode transition
     }
 
     final scaleDelta = _prevSpread > 0.001 ? spread / _prevSpread : 1.0;
     final panDelta = centroidScreen - _prevCentroidScreen;
+
+    // Shortest-path angle delta, wrapping through the ±π discontinuity.
+    var rotationDelta = angle - _prevAngle;
+    if (rotationDelta > math.pi) rotationDelta -= 2 * math.pi;
+    if (rotationDelta < -math.pi) rotationDelta += 2 * math.pi;
+
     _prevSpread = spread;
     _prevCentroidScreen = centroidScreen;
+    _prevAngle = angle;
 
     events.add(CanvasScaleEvent(
       focalPoint: centroidScreen,
       scaleDelta: scaleDelta,
       panDelta: panDelta,
+      rotation: rotationDelta,
     ));
 
     return events;

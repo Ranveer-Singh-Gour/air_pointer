@@ -5,25 +5,40 @@ import 'package:air_pointer/src/events/pointer_input_event.dart';
 import 'package:flutter/widgets.dart';
 
 final class CanvasInputController {
-  CanvasInputController({required List<CanvasInputSource> sources})
-      : _sources = List.unmodifiable(sources) {
+  CanvasInputController({
+    required List<CanvasInputSource> sources,
+    Set<CanvasInputSource>? muteWhenActive,
+    Stream<bool>? activeStream,
+  })  : assert(
+          (muteWhenActive == null) == (activeStream == null),
+          'Provide both muteWhenActive and activeStream, or neither.',
+        ),
+        _sources = List.unmodifiable(sources),
+        _muteWhenActive = muteWhenActive {
+    if (activeStream != null) {
+      _suppressionSub = activeStream.listen((active) => _suppressed = active);
+    }
     _merge();
   }
 
   final List<CanvasInputSource> _sources;
+  final Set<CanvasInputSource>? _muteWhenActive;
   final StreamController<PointerInputEvent> _merged =
       StreamController.broadcast();
   final List<StreamSubscription<PointerInputEvent>> _subscriptions = [];
+
+  bool _suppressed = false;
+  StreamSubscription<bool>? _suppressionSub;
 
   Stream<PointerInputEvent> get events => _merged.stream;
 
   void _merge() {
     for (final source in _sources) {
+      final isMuted = _muteWhenActive?.contains(source) ?? false;
       _subscriptions.add(
-        source.events.listen(
-          _merged.add,
-          onError: _merged.addError,
-        ),
+        source.events
+            .where((_) => !isMuted || !_suppressed)
+            .listen(_merged.add, onError: _merged.addError),
       );
     }
   }
@@ -39,6 +54,7 @@ final class CanvasInputController {
       );
 
   Future<void> dispose() async {
+    await _suppressionSub?.cancel();
     for (final sub in _subscriptions) {
       await sub.cancel();
     }

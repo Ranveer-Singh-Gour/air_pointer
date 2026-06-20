@@ -46,6 +46,7 @@ final class CanvasScaleEvent extends PointerInputEvent {
     required this.focalPoint,
     required this.scaleDelta,
     required this.panDelta,
+    this.rotation = 0.0,
   });
 
   final Offset focalPoint;
@@ -53,6 +54,9 @@ final class CanvasScaleEvent extends PointerInputEvent {
   /// Multiplicative scale factor: 1.05 = 5% zoom in, 0.95 = 5% zoom out.
   final double scaleDelta;
   final Offset panDelta;
+
+  /// Rotation delta in radians; positive = clockwise in screen coordinates.
+  final double rotation;
 }
 
 final class CanvasScaleEndEvent extends PointerInputEvent {

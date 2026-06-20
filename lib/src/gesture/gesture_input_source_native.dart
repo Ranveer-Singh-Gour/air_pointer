@@ -5,6 +5,7 @@ import 'package:air_pointer/src/events/pointer_input_event.dart';
 import 'package:air_pointer/src/gesture/calibration_result.dart';
 import 'package:air_pointer/src/gesture/gesture_phase.dart';
 import 'package:air_pointer/src/gesture/hand_gesture_recognizer.dart';
+import 'package:air_pointer/src/gesture/hand_tracking_status.dart';
 import 'package:air_pointer/src/gesture/landmark_provider.dart';
 import 'package:flutter/widgets.dart';
 
@@ -16,12 +17,14 @@ final class GestureInputSource implements CanvasInputSource {
     double dwellRadius = 12.0,
     bool scrollEnabled = false,
     double scrollScale = 3.0,
+    Duration predictionHorizon = Duration.zero,
   }) {
     _recognizer = HandGestureRecognizer(
       dwellDuration: dwellDuration,
       dwellRadius: dwellRadius,
       scrollEnabled: scrollEnabled,
       scrollScale: scrollScale,
+      predictionHorizon: predictionHorizon,
     );
   }
 
@@ -41,14 +44,24 @@ final class GestureInputSource implements CanvasInputSource {
       StreamController.broadcast();
   final StreamController<GestureDebugInfo> _debugController =
       StreamController.broadcast();
+  final StreamController<HandTrackingStatus> _statusController =
+      StreamController.broadcast();
 
   Stream<GestureDebugInfo> get debugInfo => _debugController.stream;
+
+  /// Lifecycle stream: initializing → cameraReady → tracking ⇄ lost → error.
+  ///
+  /// Only emits when a [LandmarkProvider] is configured. Empty otherwise.
+  Stream<HandTrackingStatus> get statusStream => _statusController.stream;
 
   late final HandGestureRecognizer _recognizer;
 
   Size _canvasSize = Size.zero;
   StreamSubscription<HandDetectionFrame>? _frameSub;
   DateTime? _prevFrameTime;
+  bool _wasTracking = false;
+  bool _hasErrored = false;
+  bool _cameraReadyEmitted = false;
 
   @override
   Stream<PointerInputEvent> get events => _controller.stream;
@@ -62,10 +75,21 @@ final class GestureInputSource implements CanvasInputSource {
     final provider = landmarkProvider;
     if (provider == null) return;
 
+    _emitStatus(const HandTrackingInitializing());
     _frameSub = provider.frames.listen(
       _onFrame,
-      onError: (Object e, StackTrace st) => onError?.call(e, st),
+      onError: (Object e, StackTrace st) {
+        if (!_hasErrored) {
+          _hasErrored = true;
+          _emitStatus(HandTrackingError(e));
+        }
+        onError?.call(e, st);
+      },
     );
+  }
+
+  void _emitStatus(HandTrackingStatus status) {
+    if (!_statusController.isClosed) _statusController.add(status);
   }
 
   void _onFrame(HandDetectionFrame frame) {
@@ -74,6 +98,11 @@ final class GestureInputSource implements CanvasInputSource {
         ? now.difference(_prevFrameTime!).inMicroseconds / 1e6
         : 1.0 / 30.0;
     _prevFrameTime = now;
+
+    if (!_cameraReadyEmitted) {
+      _cameraReadyEmitted = true;
+      _emitStatus(const HandTrackingCameraReady());
+    }
 
     final lms = frame.landmarks.isEmpty ? null : frame.landmarks;
     final secondLms =
@@ -88,6 +117,17 @@ final class GestureInputSource implements CanvasInputSource {
 
     for (final e in result.events) {
       if (!_controller.isClosed) _controller.add(e);
+    }
+
+    if (!_hasErrored) {
+      final nowTracking = result.debug.phase == GesturePhase.hovering ||
+          result.debug.phase == GesturePhase.down;
+      if (!_wasTracking && nowTracking) {
+        _emitStatus(const HandTrackingTracking());
+      } else if (_wasTracking && !nowTracking) {
+        _emitStatus(const HandTrackingLost());
+      }
+      _wasTracking = nowTracking;
     }
 
     if (!_debugController.isClosed) {
@@ -120,6 +160,7 @@ final class GestureInputSource implements CanvasInputSource {
     _frameSub?.cancel();
     _frameSub = null;
     landmarkProvider?.dispose();
+    unawaited(_statusController.close());
     unawaited(_debugController.close());
     unawaited(_controller.close());
   }

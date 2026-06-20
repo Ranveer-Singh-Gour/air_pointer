@@ -7,7 +7,8 @@
 // classic workers since Chrome 80.
 //
 // Protocol (all messages are plain JSON-serialisable objects):
-//   main → worker  { type: 'init',    wasmPath: string, modelPath: string }
+//   main → worker  { type: 'init', bundleUrl: string,
+//                    wasmFolderUrl: string, modelUrl: string }
 //   main → worker  { type: 'detect',  frame: ImageBitmap, timestampMs: number }
 //   main → worker  { type: 'dispose' }
 //
@@ -17,6 +18,10 @@
 //                    handednesses: Array<'Left'|'Right'|'Unknown'>,
 //                    timestampMs: number, workerLatencyMs: number }
 //   worker → main  { type: 'error', message: string }
+//
+// Self-hosting: pass bundleUrl/wasmFolderUrl/modelUrl pointing to local assets
+// (e.g. downloaded by scripts/download_mediapipe.sh into example/web/mediapipe/).
+// CDN is the default when GestureInputSource is constructed without overrides.
 
 let landmarker = null;
 let initialized = false;
@@ -31,13 +36,11 @@ self.onmessage = async (event) => {
     try {
       // Dynamic import() keeps the ESM bundle while allowing importScripts()
       // to remain available for MediaPipe's WASM sub-worker threads.
-      const { FilesetResolver, HandLandmarker } = await import(
-        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/vision_bundle.mjs'
-      );
-      const vision = await FilesetResolver.forVisionTasks(event.data.wasmPath);
+      const { FilesetResolver, HandLandmarker } = await import(event.data.bundleUrl);
+      const vision = await FilesetResolver.forVisionTasks(event.data.wasmFolderUrl);
       landmarker = await HandLandmarker.createFromOptions(vision, {
         baseOptions: {
-          modelAssetPath: event.data.modelPath,
+          modelAssetPath: event.data.modelUrl,
           delegate: 'CPU',  // GPU conflicts with Flutter's WebGL context
         },
         runningMode: 'VIDEO',

@@ -2,8 +2,10 @@
 ///
 /// Values match the gesture categories produced by the `hand_detection` package
 /// (which wraps a TFLite gesture classifier). On web, [GestureDebugInfo]
-/// always reports [none] because the MediaPipe HandLandmarker used there does
-/// not include a gesture classifier — only landmark coordinates are available.
+/// populates [GestureDebugInfo.detectedGesture] via the pure-Dart
+/// [classifyGesture] function, which uses tip-vs-PIP landmark comparisons.
+/// On native, the [LandmarkProvider] sets the value directly from its ML
+/// classifier (e.g. `hand_detection`'s TFLite gesture model).
 ///
 /// ## Mapping from `hand_detection`
 /// | `hand_detection` category | [RecognizedGesture] value |

@@ -35,6 +35,17 @@ void main() {
       );
       expect(e.scaleDelta, 1.05);
       expect(e.panDelta, const Offset(2, 3));
+      expect(e.rotation, 0.0);
+    });
+
+    test('CanvasScaleEvent accepts explicit rotation', () {
+      const e = CanvasScaleEvent(
+        focalPoint: Offset(0, 0),
+        scaleDelta: 1.0,
+        panDelta: Offset.zero,
+        rotation: 0.1,
+      );
+      expect(e.rotation, 0.1);
     });
 
     test('CanvasScrollEvent carries position and delta', () {

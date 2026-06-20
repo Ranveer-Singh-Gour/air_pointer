@@ -70,11 +70,11 @@ final class GestureDebugInfo {
   /// hands are detected.
   final Handedness secondHandedness;
 
-  /// Discrete gesture classified for the primary hand by the ML backend.
+  /// Discrete gesture classified for the primary hand.
   ///
-  /// Always [RecognizedGesture.none] on web (the MediaPipe HandLandmarker used
-  /// there provides landmarks only, not gesture labels). On native, set by the
-  /// [LandmarkProvider] — e.g. via `hand_detection`'s gesture classifier.
+  /// On web, populated by [classifyGesture] using tip-vs-PIP y-coordinate
+  /// comparisons from the raw MediaPipe landmarks. On native, set by the
+  /// [LandmarkProvider] — e.g. via `hand_detection`'s TFLite gesture classifier.
   final RecognizedGesture detectedGesture;
 
   /// Discrete gesture classified for the second hand.

@@ -35,7 +35,9 @@ class _SandboxCanvasState extends State<SandboxCanvas> {
   late final StreamSubscription<PointerInputEvent> _sub;
   late final GestureInputSource _gestureSource;
   StreamSubscription<GestureDebugInfo>? _debugSub;
+  StreamSubscription<HandTrackingStatus>? _statusSub;
 
+  HandTrackingStatus _trackingStatus = const HandTrackingInitializing();
   List<DraggableBox> _boxes = List.from(_initialBoxes);
   int? _draggingIndex;
   Offset _lastDragPosition = Offset.zero;
@@ -76,6 +78,9 @@ class _SandboxCanvasState extends State<SandboxCanvas> {
           if (_showDebug) _debugInfo = info;
         });
       }
+    });
+    _statusSub = _gestureSource.statusStream.listen((status) {
+      if (mounted) setState(() => _trackingStatus = status);
     });
   }
 
@@ -166,6 +171,7 @@ class _SandboxCanvasState extends State<SandboxCanvas> {
 
   @override
   void dispose() {
+    unawaited(_statusSub?.cancel());
     unawaited(_debugSub?.cancel());
     unawaited(_sub.cancel());
     unawaited(_controller.dispose());
@@ -226,10 +232,10 @@ class _SandboxCanvasState extends State<SandboxCanvas> {
                 ),
               ),
 
-            // Tracking-lost hint — shown in camera mode when no hand detected.
+            // Tracking-lost hint — shown when camera is live but no hand in frame.
             if (_showCamera &&
-                _currentPhase == GesturePhase.lost &&
-                _gestureError == null)
+                (_trackingStatus is HandTrackingCameraReady ||
+                    _trackingStatus is HandTrackingLost))
               const Positioned(
                 left: 0,
                 right: 0,

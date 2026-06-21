@@ -5,6 +5,7 @@ import 'package:air_pointer/air_pointer.dart';
 import 'package:air_pointer_example/src/calibration_screen.dart';
 import 'package:air_pointer_example/src/draggable_box.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart' show Ticker;
 
 const kCanvasBackground = Color(0xFF121212);
 
@@ -30,7 +31,8 @@ class SandboxCanvas extends StatefulWidget {
   State<SandboxCanvas> createState() => _SandboxCanvasState();
 }
 
-class _SandboxCanvasState extends State<SandboxCanvas> {
+class _SandboxCanvasState extends State<SandboxCanvas>
+    with TickerProviderStateMixin {
   late final CanvasInputController _controller;
   late final StreamSubscription<PointerInputEvent> _sub;
   late final GestureInputSource _gestureSource;
@@ -43,6 +45,12 @@ class _SandboxCanvasState extends State<SandboxCanvas> {
   Offset _lastDragPosition = Offset.zero;
   Offset _canvasOffset = Offset.zero;
   double _scale = 1.0;
+
+  // Scroll momentum — events accumulate into velocity; ticker decays it.
+  Offset _scrollAccum = Offset.zero;
+  Offset _scrollMomentum = Offset.zero;
+  Ticker? _scrollTicker;
+  Duration _prevScrollTick = Duration.zero;
 
   Offset? _cursorPosition;
   bool _isDown = false;
@@ -82,6 +90,7 @@ class _SandboxCanvasState extends State<SandboxCanvas> {
     _statusSub = _gestureSource.statusStream.listen((status) {
       if (mounted) setState(() => _trackingStatus = status);
     });
+    _scrollTicker = createTicker(_onScrollTick);
   }
 
   @override
@@ -118,7 +127,11 @@ class _SandboxCanvasState extends State<SandboxCanvas> {
           _canvasOffset += panDelta;
         });
       case CanvasScrollEvent(:final delta):
-        setState(() => _canvasOffset -= delta * 0.5);
+        _scrollAccum -= delta;
+        if (!(_scrollTicker?.isActive ?? false)) {
+          _prevScrollTick = Duration.zero;
+          _scrollTicker?.start();
+        }
       case CanvasScaleEndEvent():
         break;
     }
@@ -131,6 +144,36 @@ class _SandboxCanvasState extends State<SandboxCanvas> {
     if (_isDown) return GesturePhase.down;
     if (_currentPhase == GesturePhase.grace) return GesturePhase.grace;
     return GesturePhase.hovering;
+  }
+
+  // Physics-based scroll decay (half-life ≈ 125 ms).
+  void _onScrollTick(Duration elapsed) {
+    final dt = _prevScrollTick == Duration.zero
+        ? 0.016
+        : (elapsed - _prevScrollTick).inMilliseconds.clamp(1, 50) / 1000.0;
+    _prevScrollTick = elapsed;
+
+    // Convert accumulated raw deltas from this frame into velocity (px/s).
+    if (_scrollAccum != Offset.zero) {
+      _scrollMomentum += _scrollAccum / dt;
+      // Cap speed so a single large wheel notch can't warp the canvas.
+      const maxSpeed = 8000.0;
+      final speed = _scrollMomentum.distance;
+      if (speed > maxSpeed) _scrollMomentum = _scrollMomentum * (maxSpeed / speed);
+      _scrollAccum = Offset.zero;
+    }
+
+    final move = _scrollMomentum * dt;
+    _scrollMomentum *= math.exp(-5.5 * dt);
+
+    if (_scrollMomentum.distance < 0.5) {
+      _scrollMomentum = Offset.zero;
+      _scrollTicker?.stop();
+      _prevScrollTick = Duration.zero;
+      if (move.distance < 0.5) return;
+    }
+
+    setState(() => _canvasOffset += move);
   }
 
   Offset _toCanvas(Offset screen) => (screen - _canvasOffset) / _scale;
@@ -171,6 +214,7 @@ class _SandboxCanvasState extends State<SandboxCanvas> {
 
   @override
   void dispose() {
+    _scrollTicker?.dispose();
     unawaited(_statusSub?.cancel());
     unawaited(_debugSub?.cancel());
     unawaited(_sub.cancel());
@@ -182,15 +226,18 @@ class _SandboxCanvasState extends State<SandboxCanvas> {
   Widget build(BuildContext context) => _controller.buildSurface(
         child: Stack(
           children: [
-            // Canvas
-            ClipRect(
-              child: CustomPaint(
-                painter: _BoxesPainter(
-                  boxes: _boxes,
-                  offset: _canvasOffset,
-                  scale: _scale,
+            // Canvas — isolated in its own layer so scroll repaints don't
+            // invalidate the cursor/overlay layer above it.
+            RepaintBoundary(
+              child: ClipRect(
+                child: CustomPaint(
+                  painter: _BoxesPainter(
+                    boxes: _boxes,
+                    offset: _canvasOffset,
+                    scale: _scale,
+                  ),
+                  size: Size.infinite,
                 ),
-                size: Size.infinite,
               ),
             ),
 

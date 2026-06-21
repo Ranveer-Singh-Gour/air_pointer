@@ -51,6 +51,7 @@ final class HandGestureRecognizer {
     bool scrollEnabled = false,
     this.scrollScale = 3.0,
     Duration predictionHorizon = Duration.zero,
+    this.swipeThreshold = 0.0,
   })  : _pinchCloseThreshold = pinchCloseThreshold,
         _pinchOpenThreshold = pinchOpenThreshold,
         _dwellThresholdS = dwellDuration.inMicroseconds / 1e6,
@@ -102,6 +103,13 @@ final class HandGestureRecognizer {
   /// Multiplier applied to the raw screen-pixel delta when emitting
   /// [CanvasScrollEvent] during a pointing-finger scroll gesture.
   final double scrollScale;
+
+  /// Minimum cursor speed in screen pixels/s required to emit a
+  /// [CanvasSwipeEvent]. Set to 0 (the default) to disable swipe detection.
+  final double swipeThreshold;
+
+  // Swipe detection state.
+  double _swipeCooldownS = 0.0;
 
   OneEuroFilter _xFilter;
   OneEuroFilter _yFilter;
@@ -242,6 +250,7 @@ final class HandGestureRecognizer {
     _mustMoveBeforeDwell = false;
     _prevScrollPosition = null;
     _isScrollActive = false;
+    _swipeCooldownS = 0.0;
     _xFilter.reset();
     _yFilter.reset();
   }
@@ -416,7 +425,46 @@ final class HandGestureRecognizer {
       }
       return const [];
     }
+    final swipe = _checkSwipe(canvasSize, dt);
+    if (swipe != null) return [swipe, CanvasHoverEvent(position: position)];
     return [CanvasHoverEvent(position: position)];
+  }
+
+  // Detects a fast directional movement and returns a [CanvasSwipeEvent] when
+  // cursor velocity exceeds [swipeThreshold] in a cardinal direction.
+  //
+  // Uses the OneEuroFilter's already-computed velocity to avoid extra state.
+  // A 400 ms cooldown prevents multiple swipes from one gesture.
+  CanvasSwipeEvent? _checkSwipe(Size canvasSize, double dt) {
+    if (swipeThreshold <= 0) return null;
+    _swipeCooldownS = math.max(0, _swipeCooldownS - dt);
+    if (_swipeCooldownS > 0) return null;
+
+    // Filter velocity is in normalised-coord/s; convert to screen px/s.
+    // x is already mirrored in the filter input so positive = cursor moves right.
+    final velX = _xFilter.velocity * canvasSize.width;
+    final velY = _yFilter.velocity * canvasSize.height;
+    final speed = math.sqrt(velX * velX + velY * velY);
+    if (speed < swipeThreshold) return null;
+
+    final absX = velX.abs();
+    final absY = velY.abs();
+    // Require 60/40 directional dominance to avoid diagonal false-positives.
+    if (absX > absY * 1.5) {
+      _swipeCooldownS = 0.4;
+      return CanvasSwipeEvent(
+        direction: velX > 0 ? SwipeDirection.right : SwipeDirection.left,
+        velocity: speed,
+      );
+    }
+    if (absY > absX * 1.5) {
+      _swipeCooldownS = 0.4;
+      return CanvasSwipeEvent(
+        direction: velY > 0 ? SwipeDirection.down : SwipeDirection.up,
+        velocity: speed,
+      );
+    }
+    return null;
   }
 
   List<PointerInputEvent> _handleTwoHand(
@@ -526,19 +574,18 @@ final class HandGestureRecognizer {
     return (_dwellElapsedS / _dwellThresholdS).clamp(0.0, 1.0);
   }
 
-  // Returns true when the index finger is extended and both the middle and pinky
-  // fingers are curled. The pinky check excludes the "gun" gesture (index +
-  // pinky extended), which would otherwise pass a 2-finger check.
-  // MediaPipe Y: 0 = top, 1 = bottom. Extended finger tip has lower Y than PIP.
+  // Returns true when the index finger is extended and the middle finger is
+  // curled. MediaPipe Y: 0 = top, 1 = bottom; extended tip has lower Y than PIP.
+  //
+  // The original stricter check also required the pinky to be curled, but that
+  // caused false negatives when users naturally extend the pinky while pointing.
+  // The middle-curled check is sufficient to exclude the common two-finger
+  // (index + middle) open-hand gesture that would otherwise mis-trigger scrolling.
   bool _detectPointing(List<HandLandmarkPoint> landmarks) {
     final indexTip = landmarks.getLandmark(HandLandmarkType.indexTip);
     final indexPip = landmarks.getLandmark(HandLandmarkType.indexPip);
     final middleTip = landmarks.getLandmark(HandLandmarkType.middleTip);
     final middlePip = landmarks.getLandmark(HandLandmarkType.middlePip);
-    final pinkyTip = landmarks.getLandmark(HandLandmarkType.pinkyTip);
-    final pinkyPip = landmarks.getLandmark(HandLandmarkType.pinkyPip);
-    return indexTip.y < indexPip.y &&
-        middleTip.y > middlePip.y &&
-        pinkyTip.y > pinkyPip.y;
+    return indexTip.y < indexPip.y && middleTip.y > middlePip.y;
   }
 }

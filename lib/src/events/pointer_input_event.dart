@@ -80,3 +80,24 @@ final class CanvasScaleEndEvent extends PointerInputEvent {
 final class CanvasCancelEvent extends PointerInputEvent {
   const CanvasCancelEvent();
 }
+
+/// Cardinal direction of a [CanvasSwipeEvent].
+enum SwipeDirection { up, down, left, right }
+
+/// Emitted when the cursor moves fast enough in a single direction to be
+/// classified as a swipe gesture.
+///
+/// Only fired by [GestureInputSource] when `swipeThreshold > 0`. The cursor
+/// continues emitting [CanvasHoverEvent] alongside the swipe, so consumers
+/// do not need to separately track position.
+///
+/// [velocity] is the cursor speed in screen pixels per second at the moment
+/// the swipe was detected.
+final class CanvasSwipeEvent extends PointerInputEvent {
+  const CanvasSwipeEvent({required this.direction, required this.velocity});
+
+  final SwipeDirection direction;
+
+  /// Cursor speed in screen pixels per second.
+  final double velocity;
+}

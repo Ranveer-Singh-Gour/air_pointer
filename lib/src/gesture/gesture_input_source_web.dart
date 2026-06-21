@@ -212,7 +212,9 @@ final class GestureInputSource implements CanvasInputSource {
     if (rawMsg.contains('Content-Security-Policy') ||
         rawMsg.contains("'unsafe-eval'")) {
       return 'MediaPipe blocked by Content-Security-Policy — add '
-          "'wasm-unsafe-eval' to your CSP script-src directive.";
+          "'wasm-unsafe-eval' to your CSP script-src directive. "
+          'If loading from CDN, also allowlist the bundle origin '
+          '(e.g. cdn.jsdelivr.net).';
     }
     // CORS rejection when serving the worker script from a different origin.
     if (rawMsg.contains('CORS') || rawMsg.contains('cross-origin')) {

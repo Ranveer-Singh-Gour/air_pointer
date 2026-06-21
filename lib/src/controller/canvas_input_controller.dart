@@ -9,14 +9,18 @@ final class CanvasInputController {
     required List<CanvasInputSource> sources,
     Set<CanvasInputSource>? muteWhenActive,
     Stream<bool>? activeStream,
-  })  : assert(
-          (muteWhenActive == null) == (activeStream == null),
-          'Provide both muteWhenActive and activeStream, or neither.',
-        ),
-        _sources = List.unmodifiable(sources),
+  })  : _sources = List.unmodifiable(sources),
         _muteWhenActive = muteWhenActive {
+    if ((muteWhenActive == null) != (activeStream == null)) {
+      throw ArgumentError(
+        'Provide both muteWhenActive and activeStream, or neither.',
+      );
+    }
     if (activeStream != null) {
-      _suppressionSub = activeStream.listen((active) => _suppressed = active);
+      _suppressionSub = activeStream.listen(
+        (active) => _suppressed = active,
+        onError: (Object _, StackTrace __) {},
+      );
     }
     _merge();
   }

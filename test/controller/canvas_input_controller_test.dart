@@ -190,5 +190,57 @@ void main() {
       await sub.cancel();
       await controller.dispose();
     });
+
+    test('muteWhenActive without activeStream throws ArgumentError', () {
+      final a = _FakeSource();
+      expect(
+        () => CanvasInputController(
+          sources: [a],
+          muteWhenActive: {a},
+          // activeStream intentionally omitted
+        ),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('activeStream without muteWhenActive throws ArgumentError', () {
+      final a = _FakeSource();
+      final ctrl = StreamController<bool>.broadcast();
+      expect(
+        () => CanvasInputController(
+          sources: [a],
+          activeStream: ctrl.stream,
+          // muteWhenActive intentionally omitted
+        ),
+        throwsA(isA<ArgumentError>()),
+      );
+      ctrl.close();
+    });
+
+    test('error on activeStream is silenced — does not crash or leak', () async {
+      final mouse = _FakeSource();
+      final activeCtrl = StreamController<bool>.broadcast();
+      final controller = CanvasInputController(
+        sources: [mouse],
+        muteWhenActive: {mouse},
+        activeStream: activeCtrl.stream,
+      );
+
+      final received = <PointerInputEvent>[];
+      final sub = controller.events.listen(received.add);
+
+      // Error on the activeStream must not propagate as an unhandled error.
+      activeCtrl.addError(StateError('suppression stream failed'));
+      await Future<void>.delayed(Duration.zero);
+
+      // _suppressed stays at its last value (false); events still flow.
+      mouse.emit(const CanvasDownEvent(position: Offset(1, 1)));
+      await Future<void>.delayed(Duration.zero);
+      expect(received, hasLength(1));
+
+      await sub.cancel();
+      await controller.dispose();
+      await activeCtrl.close();
+    });
   });
 }

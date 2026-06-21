@@ -73,7 +73,7 @@ final class GestureInputSource implements CanvasInputSource {
 
   Future<void> initialize() async {
     final provider = landmarkProvider;
-    if (provider == null) return;
+    if (provider == null || _frameSub != null) return;
 
     _emitStatus(const HandTrackingInitializing());
     _frameSub = provider.frames.listen(

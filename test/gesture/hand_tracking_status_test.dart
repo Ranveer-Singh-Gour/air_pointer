@@ -251,5 +251,33 @@ void main() {
       expect(statuses.last, isA<HandTrackingTracking>());
       src.dispose();
     });
+
+    test('double initialize() is idempotent — no duplicate subscriptions', () async {
+      final provider = _MockProvider();
+      final src = _source(provider);
+      final statuses = <HandTrackingStatus>[];
+      src.statusStream.listen(statuses.add);
+
+      await src.initialize();
+      await src.initialize(); // second call must be a no-op
+      await Future<void>.delayed(Duration.zero);
+
+      // Only one HandTrackingInitializing emitted.
+      expect(statuses.whereType<HandTrackingInitializing>().length, 1);
+
+      // Bring recognizer to hovering (3-frame acquisition gate).
+      await _push(provider, _openFrame(), 3);
+
+      // Subscribe, then push one frame. A duplicate listener routes each push
+      // through _onFrame twice — doubling events per push. Single listener = 1.
+      final events = <Object>[];
+      final sub = src.events.listen(events.add);
+      provider.push(_openFrame());
+      await Future<void>.delayed(Duration.zero);
+
+      expect(events, hasLength(1));
+      await sub.cancel();
+      src.dispose();
+    });
   });
 }

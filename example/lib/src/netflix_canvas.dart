@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:air_pointer/air_pointer.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart' show Ticker;
 
 // ── Layout constants ──────────────────────────────────────────────────────────
 
@@ -181,7 +182,8 @@ class NetflixCanvas extends StatefulWidget {
   State<NetflixCanvas> createState() => _NetflixCanvasState();
 }
 
-class _NetflixCanvasState extends State<NetflixCanvas> {
+class _NetflixCanvasState extends State<NetflixCanvas>
+    with TickerProviderStateMixin {
   late final CanvasInputController _controller;
   late final GestureInputSource _gestureSource;
   late final StreamSubscription<PointerInputEvent> _sub;
@@ -196,7 +198,21 @@ class _NetflixCanvasState extends State<NetflixCanvas> {
   _Card? _selectedCard;
   Size _size = Size.zero;
 
+  // Pinch-drag scroll state
+  bool _isDragScrolling = false;
+  Offset? _prevMovePos;
+
+  // Scroll inertia — driven by a Ticker after pinch-drag release.
+  double _inertiaVY = 0.0;   // vertical velocity px/s (positive = scrolling down)
+  double _inertiaVX = 0.0;   // horizontal row-scroll velocity px/s
+  int? _inertiaRow;           // which row the horizontal inertia applies to
+  Ticker? _inertiaTicker;
+  Duration _prevInertiaTick = Duration.zero;
+
+  // Cursor/gesture state
   GesturePhase _phase = GesturePhase.lost;
+  double _dwellProgress = 0.0;
+  bool _isPointing = false;
   bool _showCamera = false;
 
   @override
@@ -205,16 +221,25 @@ class _NetflixCanvasState extends State<NetflixCanvas> {
     _gestureSource = GestureInputSource(
       onError: (e, st) => debugPrint('GestureInputSource error: $e\n$st'),
       pinchConfirmFrames: 2,
-      dwellDuration: const Duration(milliseconds: 700),
-      dwellRadius: 14.0,
+      dwellDuration: const Duration(milliseconds: 500),
+      dwellRadius: 30.0,
       scrollEnabled: true,
+      scrollScale: 5.0,
+      swipeThreshold: 600.0,
     );
     _controller = CanvasInputController(
       sources: [MouseInputSource(), _gestureSource],
     );
     _sub = _controller.events.listen(_onInput);
+    _inertiaTicker = createTicker(_onInertiaTick);
     _debugSub = _gestureSource.debugInfo.listen((info) {
-      if (mounted) setState(() => _phase = info.phase);
+      if (mounted) {
+        setState(() {
+          _phase = info.phase;
+          _dwellProgress = info.dwellProgress;
+          _isPointing = info.isPointing;
+        });
+      }
     });
     _statusSub = _gestureSource.statusStream.listen((_) {});
   }
@@ -228,11 +253,50 @@ class _NetflixCanvasState extends State<NetflixCanvas> {
 
   @override
   void dispose() {
+    _inertiaTicker?.dispose();
     unawaited(_statusSub?.cancel());
     unawaited(_debugSub?.cancel());
     unawaited(_sub.cancel());
     unawaited(_controller.dispose());
     super.dispose();
+  }
+
+  // Physics-based inertia decay (half-life ≈ 125 ms, same as sandbox).
+  void _onInertiaTick(Duration elapsed) {
+    final dt = _prevInertiaTick == Duration.zero
+        ? 0.016
+        : (elapsed - _prevInertiaTick).inMilliseconds.clamp(1, 50) / 1000.0;
+    _prevInertiaTick = elapsed;
+
+    final decay = math.exp(-5.5 * dt);
+    _inertiaVY *= decay;
+    _inertiaVX *= decay;
+
+    final moveY = _inertiaVY * dt;
+    final moveX = _inertiaVX * dt;
+
+    if (_inertiaVY.abs() < 0.5 && _inertiaVX.abs() < 0.5) {
+      _inertiaVY = 0;
+      _inertiaVX = 0;
+      _inertiaTicker?.stop();
+      _prevInertiaTick = Duration.zero;
+    }
+
+    setState(() {
+      _verticalScroll = (_verticalScroll + moveY).clamp(0.0, _maxVerticalScroll);
+      final ri = _inertiaRow;
+      if (ri != null && moveX.abs() > 0.1) {
+        _rowScrolls[ri] = ((_rowScrolls[ri] ?? 0) + moveX).clamp(0.0, _maxRowScroll(ri));
+      }
+    });
+  }
+
+  void _startInertia(double vy, double vx, int? row) {
+    _inertiaVY = vy;
+    _inertiaVX = vx;
+    _inertiaRow = row;
+    _prevInertiaTick = Duration.zero;
+    if (!(_inertiaTicker?.isActive ?? false)) _inertiaTicker?.start();
   }
 
   double get _maxVerticalScroll {
@@ -264,9 +328,10 @@ class _NetflixCanvasState extends State<NetflixCanvas> {
           setState(() => _selectedCard = _kFeaturedCard);
         }
 
-      case CanvasScrollEvent(:final delta):
-        final row = _rowForPos(_cursorPos);
+      case CanvasScrollEvent(:final delta, :final position):
+        final row = _rowForPos(position);
         setState(() {
+          _cursorPos = position;
           _verticalScroll =
               (_verticalScroll + delta.dy).clamp(0, _maxVerticalScroll);
           if (row != null && delta.dx.abs() > 2) {
@@ -275,18 +340,80 @@ class _NetflixCanvasState extends State<NetflixCanvas> {
           }
         });
 
-      // Track cursor position during hand-gesture pinch-drag so the dot
-      // and hover state stay accurate even when not in pointing-scroll mode.
+      // Pinch-down: begin drag-scroll session.
       case CanvasDownEvent(:final position):
-      case CanvasMoveEvent(:final position):
         setState(() {
+          _cursorPos = position;
+          _hovered = _hitTest(position);
+          _hoveredFeatured = _isOnFeatured(position);
+          _isDragScrolling = true;
+          _prevMovePos = position;
+        });
+
+      // Pinch-drag: translate vertical/horizontal movement into scroll.
+      // Touch-style: dragging up reveals content below; dragging right scrolls
+      // the current row leftward. Scale is 1:1 (pixel-for-pixel follow).
+      case CanvasMoveEvent(:final position):
+        final prev = _prevMovePos;
+        setState(() {
+          if (_isDragScrolling && prev != null) {
+            final dy = position.dy - prev.dy;
+            final dx = position.dx - prev.dx;
+            _verticalScroll =
+                (_verticalScroll - dy).clamp(0.0, _maxVerticalScroll);
+            final ri = _rowForPos(position);
+            if (ri != null && dx.abs() > 1) {
+              _rowScrolls[ri] =
+                  ((_rowScrolls[ri] ?? 0) - dx).clamp(0.0, _maxRowScroll(ri));
+            }
+            // Track velocity for inertia (px/s at 30fps nominal).
+            _inertiaVY = -dy * 30;
+            _inertiaVX = -dx * 30;
+            _inertiaRow = _rowForPos(position);
+          }
+          _prevMovePos = position;
           _cursorPos = position;
           _hovered = _hitTest(position);
           _hoveredFeatured = _isOnFeatured(position);
         });
 
       case CanvasUpEvent():
+        if (_isDragScrolling) {
+          _startInertia(_inertiaVY, _inertiaVX, _inertiaRow);
+        }
+        _isDragScrolling = false;
+        _prevMovePos = null;
+
       case CanvasCancelEvent():
+        _isDragScrolling = false;
+        _prevMovePos = null;
+        _inertiaVY = 0;
+        _inertiaVX = 0;
+
+      // Swipe: snap-scroll by one row height (vertical) or one card (horizontal).
+      case CanvasSwipeEvent(:final direction):
+        final row = _rowForPos(_cursorPos);
+        setState(() {
+          switch (direction) {
+            case SwipeDirection.up:
+              _verticalScroll =
+                  (_verticalScroll + _kRowH).clamp(0.0, _maxVerticalScroll);
+            case SwipeDirection.down:
+              _verticalScroll =
+                  (_verticalScroll - _kRowH).clamp(0.0, _maxVerticalScroll);
+            case SwipeDirection.left:
+              if (row != null) {
+                _rowScrolls[row] =
+                    ((_rowScrolls[row] ?? 0) + _kStride).clamp(0.0, _maxRowScroll(row));
+              }
+            case SwipeDirection.right:
+              if (row != null) {
+                _rowScrolls[row] =
+                    ((_rowScrolls[row] ?? 0) - _kStride).clamp(0.0, _maxRowScroll(row));
+              }
+          }
+        });
+
       case CanvasScaleEvent():
       case CanvasScaleEndEvent():
         break;
@@ -422,13 +549,17 @@ class _NetflixCanvasState extends State<NetflixCanvas> {
                   child: Center(child: _TrackingHint()),
                 ),
 
-              // Phase-aware cursor dot
+              // Phase-aware cursor with dwell ring
               if (_cursorPos != null)
                 Positioned(
-                  left: _cursorPos!.dx - 8,
-                  top: _cursorPos!.dy - 8,
+                  left: _cursorPos!.dx - 12,
+                  top: _cursorPos!.dy - 12,
                   child: IgnorePointer(
-                    child: _CursorDot(phase: _phase),
+                    child: _AirCursor(
+                      phase: _phase,
+                      dwellProgress: _dwellProgress,
+                      isPointing: _isPointing,
+                    ),
                   ),
                 ),
             ],
@@ -1075,32 +1206,89 @@ class _DetailBtn extends StatelessWidget {
       );
 }
 
-// ── Cursor dot ────────────────────────────────────────────────────────────────
+// ── Air-pointer cursor ────────────────────────────────────────────────────────
 
-class _CursorDot extends StatelessWidget {
-  const _CursorDot({required this.phase});
+class _AirCursor extends StatelessWidget {
+  const _AirCursor({
+    required this.phase,
+    this.dwellProgress = 0.0,
+    this.isPointing = false,
+  });
 
   final GesturePhase phase;
+  final double dwellProgress;
+  final bool isPointing;
 
   @override
-  Widget build(BuildContext context) {
-    final (color, opacity) = switch (phase) {
-      GesturePhase.down => (Colors.redAccent, 0.9),
-      GesturePhase.grace => (Colors.white, 0.3),
-      _ => (Colors.white, 0.85),
+  Widget build(BuildContext context) => CustomPaint(
+        size: const Size(24, 24),
+        painter: _AirCursorPainter(
+          phase: phase,
+          dwellProgress: dwellProgress,
+          isPointing: isPointing,
+        ),
+      );
+}
+
+class _AirCursorPainter extends CustomPainter {
+  const _AirCursorPainter({
+    required this.phase,
+    this.dwellProgress = 0.0,
+    this.isPointing = false,
+  });
+
+  final GesturePhase phase;
+  final double dwellProgress;
+  final bool isPointing;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+
+    final (color, opacity, filled) = switch (phase) {
+      GesturePhase.down => (Colors.redAccent, 0.9, true),
+      GesturePhase.grace => (Colors.white, 0.35, false),
+      _ when isPointing => (Colors.amberAccent, 0.9, false),
+      _ => (Colors.white, 0.85, false),
     };
-    return Container(
-      width: 16,
-      height: 16,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: color.withValues(alpha: opacity),
-        boxShadow: [
-          BoxShadow(color: color.withValues(alpha: opacity * 0.5), blurRadius: 8),
-        ],
-      ),
+
+    canvas.drawCircle(
+      center,
+      10,
+      Paint()
+        ..color = color.withValues(alpha: opacity)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
     );
+    if (filled) {
+      canvas.drawCircle(
+        center,
+        4,
+        Paint()..color = color.withValues(alpha: opacity),
+      );
+    }
+
+    // Dwell countdown arc sweeps clockwise from 12 o'clock.
+    if (dwellProgress > 0 && phase == GesturePhase.hovering) {
+      canvas.drawArc(
+        Rect.fromCircle(center: center, radius: 10),
+        -math.pi / 2,
+        dwellProgress * 2 * math.pi,
+        false,
+        Paint()
+          ..color = Colors.cyanAccent.withValues(alpha: 0.9)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 3
+          ..strokeCap = StrokeCap.round,
+      );
+    }
   }
+
+  @override
+  bool shouldRepaint(_AirCursorPainter old) =>
+      old.phase != phase ||
+      old.dwellProgress != dwellProgress ||
+      old.isPointing != isPointing;
 }
 
 // ── Tracking hint ─────────────────────────────────────────────────────────────

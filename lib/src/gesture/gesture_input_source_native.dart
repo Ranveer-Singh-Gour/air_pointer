@@ -26,6 +26,7 @@ final class GestureInputSource implements CanvasInputSource {
     bool scrollEnabled = false,
     double scrollScale = 3.0,
     Duration predictionHorizon = Duration.zero,
+    double swipeThreshold = 0.0,
   }) {
     _recognizer = HandGestureRecognizer(
       pinchCloseThreshold: pinchCloseThreshold,
@@ -41,6 +42,7 @@ final class GestureInputSource implements CanvasInputSource {
       scrollEnabled: scrollEnabled,
       scrollScale: scrollScale,
       predictionHorizon: predictionHorizon,
+      swipeThreshold: swipeThreshold,
     );
   }
 

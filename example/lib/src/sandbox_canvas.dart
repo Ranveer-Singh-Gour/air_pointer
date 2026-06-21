@@ -154,6 +154,7 @@ class _SandboxCanvasState extends State<SandboxCanvas>
           }
         }
       case CanvasScaleEndEvent():
+      case CanvasSwipeEvent():
         break;
     }
   }

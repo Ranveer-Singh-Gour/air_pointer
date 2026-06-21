@@ -933,4 +933,163 @@ void main() {
       expect(r.predictionHorizonS, closeTo(0.04, 1e-9));
     });
   });
+
+  group('swipe gesture', () {
+    // Recognizer with swipe enabled. acquireFrames=1 for test brevity.
+    HandGestureRecognizer swipeR() => HandGestureRecognizer(
+          acquireFrames: 1,
+          swipeThreshold: 600.0,
+        );
+
+    // Run the recognizer through a series of hands and collect all events.
+    List<PointerInputEvent> drive(
+      HandGestureRecognizer r,
+      List<List<HandLandmarkPoint>> frames,
+    ) {
+      final events = <PointerInputEvent>[];
+      for (final f in frames) {
+        events.addAll(
+          r.process(landmarks: f, dt: _dt, canvasSize: _size).events,
+        );
+      }
+      return events;
+    }
+
+    test('swipe right detected on fast rightward cursor movement', () {
+      final r = swipeR();
+      // Acquire at center (indexX=0.5 → smoothX=0.5, cursor at 400px).
+      r.process(landmarks: _open(), dt: _dt, canvasSize: _size);
+
+      // Move indexX 0.5 → 0.1 over 5 frames.
+      // After mirroring: smoothX 0.5 → 0.9 → cursor moves RIGHT (+320px in 5/30s).
+      // Raw velocity ≈ 0.4 / (5/30) = 2.4 norm/s × 800 = 1920 px/s >> 600 threshold.
+      final events = drive(r, [
+        _open(indexX: 0.42),
+        _open(indexX: 0.34),
+        _open(indexX: 0.26),
+        _open(indexX: 0.18),
+        _open(indexX: 0.10),
+      ]);
+
+      final swipes = events.whereType<CanvasSwipeEvent>().toList();
+      expect(swipes, hasLength(1));
+      expect(swipes.first.direction, SwipeDirection.right);
+      expect(swipes.first.velocity, greaterThan(600.0));
+    });
+
+    test('swipe left detected on fast leftward cursor movement', () {
+      final r = swipeR();
+      // Settle at right side (indexX=0.1 → smoothX≈0.9, cursor near 720px).
+      drive(r, List.filled(30, _open(indexX: 0.1)));
+
+      // Move indexX 0.1 → 0.5 → cursor moves LEFT.
+      final events = drive(r, [
+        _open(indexX: 0.18),
+        _open(indexX: 0.26),
+        _open(indexX: 0.34),
+        _open(indexX: 0.42),
+        _open(),
+      ]);
+
+      final swipes = events.whereType<CanvasSwipeEvent>().toList();
+      expect(swipes, hasLength(1));
+      expect(swipes.first.direction, SwipeDirection.left);
+    });
+
+    test('swipe up detected on fast upward cursor movement', () {
+      final r = swipeR();
+      // Settle at bottom half (indexY=0.7 → canvas y≈420px).
+      drive(r, List.filled(30, _hand(indexX: 0.5, indexY: 0.7)));
+
+      // Move indexY 0.7 → 0.3 → cursor moves UP (y decreases).
+      final events = drive(r, [
+        _hand(indexX: 0.5, indexY: 0.62),
+        _hand(indexX: 0.5, indexY: 0.54),
+        _hand(indexX: 0.5, indexY: 0.46),
+        _hand(indexX: 0.5, indexY: 0.38),
+        _hand(indexX: 0.5, indexY: 0.30),
+      ]);
+
+      final swipes = events.whereType<CanvasSwipeEvent>().toList();
+      expect(swipes, hasLength(1));
+      expect(swipes.first.direction, SwipeDirection.up);
+    });
+
+    test('swipe down detected on fast downward cursor movement', () {
+      final r = swipeR();
+      // Settle at top (indexY=0.3 → canvas y≈180px).
+      drive(r, List.filled(30, _hand(indexX: 0.5, indexY: 0.3)));
+
+      // Move indexY 0.3 → 0.7 → cursor moves DOWN (y increases).
+      final events = drive(r, [
+        _hand(indexX: 0.5, indexY: 0.38),
+        _hand(indexX: 0.5, indexY: 0.46),
+        _hand(indexX: 0.5, indexY: 0.54),
+        _hand(indexX: 0.5, indexY: 0.62),
+        _hand(indexX: 0.5, indexY: 0.70),
+      ]);
+
+      final swipes = events.whereType<CanvasSwipeEvent>().toList();
+      expect(swipes, hasLength(1));
+      expect(swipes.first.direction, SwipeDirection.down);
+    });
+
+    test('cooldown prevents multiple swipes from one gesture', () {
+      final r = swipeR();
+      r.process(landmarks: _open(), dt: _dt, canvasSize: _size);
+
+      // 10 fast-moving frames — cooldown (0.4 s = 12 frames) fires exactly once.
+      final events = drive(
+        r,
+        List.generate(10, (i) => _open(indexX: 0.5 - (i + 1) * 0.04)),
+      );
+
+      expect(events.whereType<CanvasSwipeEvent>(), hasLength(1));
+    });
+
+    test('slow movement does not trigger swipe', () {
+      final r = swipeR();
+      r.process(landmarks: _open(), dt: _dt, canvasSize: _size);
+
+      // 30 frames of tiny drift — velocity << 600 px/s.
+      final events = drive(
+        r,
+        List.generate(30, (i) => _open(indexX: 0.5 - i * 0.002)),
+      );
+
+      expect(events.whereType<CanvasSwipeEvent>(), isEmpty);
+    });
+
+    test('swipe disabled when swipeThreshold is 0', () {
+      final r = HandGestureRecognizer(acquireFrames: 1);
+      r.process(landmarks: _open(), dt: _dt, canvasSize: _size);
+
+      final events = drive(r, [
+        _open(indexX: 0.4),
+        _open(indexX: 0.3),
+        _open(indexX: 0.2),
+        _open(indexX: 0.1),
+      ]);
+
+      expect(events.whereType<CanvasSwipeEvent>(), isEmpty);
+    });
+
+    test('swipe not emitted during pinch-down drag', () {
+      final r = swipeR();
+      r.process(landmarks: _open(), dt: _dt, canvasSize: _size);
+      // Enter drag
+      r.process(landmarks: _pinch(), dt: _dt, canvasSize: _size);
+      r.process(landmarks: _pinch(), dt: _dt, canvasSize: _size);
+
+      // Fast move while pinched — no swipe during drag.
+      final events = drive(r, [
+        _pinch(indexX: 0.4),
+        _pinch(indexX: 0.3),
+        _pinch(indexX: 0.2),
+        _pinch(indexX: 0.1),
+      ]);
+
+      expect(events.whereType<CanvasSwipeEvent>(), isEmpty);
+    });
+  });
 }

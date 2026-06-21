@@ -18,6 +18,7 @@ void main() {
         CanvasScaleEvent() => 'scale',
         CanvasScaleEndEvent() => 'scaleEnd',
         CanvasCancelEvent() => 'cancel',
+        CanvasSwipeEvent() => 'swipe',
       };
       expect(result, 'down');
     });

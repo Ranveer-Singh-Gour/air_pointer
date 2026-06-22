@@ -7,6 +7,7 @@ import 'package:air_pointer/src/gesture/gesture_phase.dart';
 import 'package:air_pointer/src/gesture/hand_gesture_recognizer.dart';
 import 'package:air_pointer/src/gesture/hand_tracking_status.dart';
 import 'package:air_pointer/src/gesture/landmark_provider.dart';
+import 'package:air_pointer/src/gesture/recognized_gesture.dart';
 import 'package:flutter/widgets.dart';
 
 final class GestureInputSource implements CanvasInputSource {
@@ -27,6 +28,9 @@ final class GestureInputSource implements CanvasInputSource {
     double scrollScale = 3.0,
     Duration predictionHorizon = Duration.zero,
     double swipeThreshold = 0.0,
+    Duration longPressDuration = Duration.zero,
+    Duration doubleTapWindow = const Duration(milliseconds: 300),
+    int maxHands = 2,
   }) {
     _recognizer = HandGestureRecognizer(
       pinchCloseThreshold: pinchCloseThreshold,
@@ -43,6 +47,8 @@ final class GestureInputSource implements CanvasInputSource {
       scrollScale: scrollScale,
       predictionHorizon: predictionHorizon,
       swipeThreshold: swipeThreshold,
+      longPressDuration: longPressDuration,
+      doubleTapWindow: doubleTapWindow,
     );
   }
 
@@ -80,6 +86,7 @@ final class GestureInputSource implements CanvasInputSource {
   bool _wasTracking = false;
   bool _hasErrored = false;
   bool _cameraReadyEmitted = false;
+  RecognizedGesture _lastGesture = RecognizedGesture.none;
 
   @override
   Stream<PointerInputEvent> get events => _controller.stream;
@@ -150,6 +157,15 @@ final class GestureInputSource implements CanvasInputSource {
     for (final e in result.events) {
       if (!_controller.isClosed) _controller.add(e);
     }
+
+    // Emit CanvasGestureEvent on leading edge of each new discrete gesture.
+    final gesture = frame.detectedGesture;
+    if (gesture != RecognizedGesture.none && gesture != _lastGesture) {
+      if (!_controller.isClosed) {
+        _controller.add(CanvasGestureEvent(gesture: gesture));
+      }
+    }
+    _lastGesture = gesture;
 
     if (!_hasErrored) {
       final nowTracking = result.debug.phase == GesturePhase.hovering ||

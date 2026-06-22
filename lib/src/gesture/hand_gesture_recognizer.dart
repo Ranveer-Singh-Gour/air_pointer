@@ -52,9 +52,13 @@ final class HandGestureRecognizer {
     this.scrollScale = 3.0,
     Duration predictionHorizon = Duration.zero,
     this.swipeThreshold = 0.0,
+    Duration longPressDuration = Duration.zero,
+    Duration doubleTapWindow = const Duration(milliseconds: 300),
   })  : _pinchCloseThreshold = pinchCloseThreshold,
         _pinchOpenThreshold = pinchOpenThreshold,
         _dwellThresholdS = dwellDuration.inMicroseconds / 1e6,
+        _longPressDurationS = longPressDuration.inMicroseconds / 1e6,
+        _doubleTapWindowS = doubleTapWindow.inMicroseconds / 1e6,
         _predictionHorizonS = predictionHorizon.inMicroseconds / 1e6,
         _scrollEnabled = scrollEnabled,
         _minCutoff = minCutoff,
@@ -116,12 +120,15 @@ final class HandGestureRecognizer {
   double _minCutoff;
   double _beta;
 
-  // Dwell-click state.
-  final double _dwellThresholdS;  // 0 = dwell disabled
+  // Dwell-click / long-press / double-tap state.
+  final double _dwellThresholdS;      // 0 = dwell-tap disabled
+  final double _longPressDurationS;   // 0 = long-press disabled
+  final double _doubleTapWindowS;
   double _predictionHorizonS;  // 0 = prediction disabled
   Offset _dwellAnchor = Offset.zero;
   double _dwellElapsedS = 0;
   bool _mustMoveBeforeDwell = false;
+  double _timeSinceLastDwellS = double.infinity;
 
   // Pointing-finger scroll state.
   final bool _scrollEnabled;
@@ -248,6 +255,7 @@ final class HandGestureRecognizer {
     _dwellAnchor = Offset.zero;
     _dwellElapsedS = 0;
     _mustMoveBeforeDwell = false;
+    _timeSinceLastDwellS = double.infinity;
     _prevScrollPosition = null;
     _isScrollActive = false;
     _swipeCooldownS = 0.0;
@@ -391,12 +399,13 @@ final class HandGestureRecognizer {
         }
         _isScrollActive = true;
         final scrollDy = (position.dy - prev.dy) * scrollScale;
-        return [CanvasScrollEvent(position: position, delta: Offset(0, scrollDy))];
+        final scrollDx = (position.dx - prev.dx) * scrollScale;
+        return [CanvasScrollEvent(position: position, delta: Offset(scrollDx, scrollDy))];
       }
       _prevScrollPosition = null;
       _isScrollActive = false;
-      final dwellTap = _checkDwell(position, dt);
-      if (dwellTap != null) return [dwellTap];
+      final dwellEvents = _checkDwellEvents(position, dt);
+      if (dwellEvents.isNotEmpty) return dwellEvents;
     } else {
       // In down phase: keep anchor current so release-to-hover starts fresh.
       _dwellAnchor = position;
@@ -539,39 +548,65 @@ final class HandGestureRecognizer {
     return events;
   }
 
-  // Returns a tap event if the cursor has been within [dwellRadius] of its
-  // anchor for [_dwellThresholdS] seconds, otherwise updates dwell state.
-  CanvasTapEvent? _checkDwell(Offset position, double dt) {
-    if (_dwellThresholdS <= 0) return null;
+  // Returns dwell-tap, double-tap, or long-press events when the cursor holds
+  // still long enough. Returns an empty list when nothing fires this frame.
+  List<PointerInputEvent> _checkDwellEvents(Offset position, double dt) {
+    if (_dwellThresholdS <= 0 && _longPressDurationS <= 0) return const [];
+
+    _timeSinceLastDwellS += dt;
 
     if (_mustMoveBeforeDwell) {
-      // Waiting for cursor to move away before the next dwell can start.
       if ((position - _dwellAnchor).distance >= dwellRadius) {
         _mustMoveBeforeDwell = false;
         _dwellAnchor = position;
         _dwellElapsedS = 0;
       }
-      return null;
+      return const [];
     }
 
     if ((position - _dwellAnchor).distance >= dwellRadius) {
       _dwellAnchor = position;
       _dwellElapsedS = 0;
-      return null;
+      return const [];
     }
 
     _dwellElapsedS += dt;
-    if (_dwellElapsedS >= _dwellThresholdS) {
+
+    // Long-press fires when its threshold is reached (checked before dwell-tap
+    // so a shorter longPressDuration always wins over a longer dwellDuration).
+    if (_longPressDurationS > 0 && _dwellElapsedS >= _longPressDurationS) {
       _dwellElapsedS = 0;
       _mustMoveBeforeDwell = true;
-      return CanvasTapEvent(position: position);
+      return [CanvasLongPressEvent(position: position)];
     }
-    return null;
+
+    if (_dwellThresholdS > 0 && _dwellElapsedS >= _dwellThresholdS) {
+      _dwellElapsedS = 0;
+      _mustMoveBeforeDwell = true;
+      final isDouble = _timeSinceLastDwellS <= _doubleTapWindowS;
+      _timeSinceLastDwellS = 0;
+      return isDouble
+          ? [
+              CanvasTapEvent(position: position),
+              CanvasDoubleTapEvent(position: position),
+            ]
+          : [CanvasTapEvent(position: position)];
+    }
+
+    return const [];
   }
 
   double get _dwellProgress {
-    if (_dwellThresholdS <= 0 || _mustMoveBeforeDwell) return 0.0;
-    return (_dwellElapsedS / _dwellThresholdS).clamp(0.0, 1.0);
+    if (_mustMoveBeforeDwell) return 0.0;
+    // Use whichever active threshold is shorter.
+    final t = switch ((_dwellThresholdS > 0, _longPressDurationS > 0)) {
+      (true, true) => math.min(_dwellThresholdS, _longPressDurationS),
+      (true, false) => _dwellThresholdS,
+      (false, true) => _longPressDurationS,
+      (false, false) => 0.0,
+    };
+    if (t <= 0) return 0.0;
+    return (_dwellElapsedS / t).clamp(0.0, 1.0);
   }
 
   // Returns true when the index finger is extended and the middle finger is

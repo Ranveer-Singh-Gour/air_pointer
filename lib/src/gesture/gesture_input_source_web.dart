@@ -7,6 +7,7 @@ import 'package:air_pointer/src/boundary/canvas_input_source.dart';
 import 'package:air_pointer/src/events/pointer_input_event.dart';
 import 'package:air_pointer/src/gesture/calibration_result.dart';
 import 'package:air_pointer/src/gesture/gesture_classifier.dart';
+import 'package:air_pointer/src/gesture/recognized_gesture.dart';
 import 'package:air_pointer/src/gesture/gesture_phase.dart';
 import 'package:air_pointer/src/gesture/hand_gesture_recognizer.dart';
 import 'package:air_pointer/src/gesture/hand_landmark_point.dart';
@@ -41,6 +42,9 @@ final class GestureInputSource implements CanvasInputSource {
     double scrollScale = 3.0,
     Duration predictionHorizon = Duration.zero,
     double swipeThreshold = 0.0,
+    Duration longPressDuration = Duration.zero,
+    Duration doubleTapWindow = const Duration(milliseconds: 300),
+    this.maxHands = 2,
   }) {
     _recognizer = HandGestureRecognizer(
       pinchCloseThreshold: pinchCloseThreshold,
@@ -57,6 +61,8 @@ final class GestureInputSource implements CanvasInputSource {
       scrollScale: scrollScale,
       predictionHorizon: predictionHorizon,
       swipeThreshold: swipeThreshold,
+      longPressDuration: longPressDuration,
+      doubleTapWindow: doubleTapWindow,
     );
   }
 
@@ -72,6 +78,11 @@ final class GestureInputSource implements CanvasInputSource {
   /// Cloud Storage default is used. Set to a local path (e.g.
   /// `'/mediapipe/models/hand_landmarker.task'`) to self-host the model.
   final String? modelAssetUrl;
+
+  /// Maximum number of hands to detect per frame (1 or 2). Default 2.
+  ///
+  /// Set to 1 to improve inference speed when two-hand gestures are not needed.
+  final int maxHands;
 
   final StreamController<PointerInputEvent> _controller =
       StreamController.broadcast();
@@ -99,6 +110,7 @@ final class GestureInputSource implements CanvasInputSource {
   bool _disposed = false;
   bool _wasTracking = false;
   bool _hasErrored = false;
+  RecognizedGesture _lastGesture = RecognizedGesture.none;
 
   // Set while the worker is processing a frame; prevents flooding the worker.
   bool _workerBusy = false;
@@ -141,6 +153,7 @@ final class GestureInputSource implements CanvasInputSource {
     _initialized = true;
     _hasErrored = false;
     _wasTracking = false;
+    _lastGesture = RecognizedGesture.none;
     _emitStatus(const HandTrackingInitializing());
 
     // Fast-fail for insecure context before attempting getUserMedia. Browsers
@@ -211,6 +224,7 @@ final class GestureInputSource implements CanvasInputSource {
           'bundleUrl': '$base/vision_bundle.mjs',
           'wasmFolderUrl': '$base/wasm',
           'modelUrl': modelAssetUrl ?? _kModelUrl,
+          'numHands': maxHands,
         }.jsify()!,
       );
       // The rAF capture loop starts when the worker posts 'ready'.
@@ -353,6 +367,14 @@ final class GestureInputSource implements CanvasInputSource {
         for (final e in result.events) {
           _emit(e);
         }
+
+        // Emit CanvasGestureEvent on leading edge of each new discrete gesture.
+        final gesture = classifyGesture(lms);
+        if (gesture != RecognizedGesture.none && gesture != _lastGesture) {
+          _emit(CanvasGestureEvent(gesture: gesture));
+        }
+        _lastGesture = gesture;
+
         if (!_hasErrored) {
           final nowTracking = result.debug.phase == GesturePhase.hovering ||
               result.debug.phase == GesturePhase.down;

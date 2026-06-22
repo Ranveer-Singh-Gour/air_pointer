@@ -30,7 +30,7 @@ final class GestureInputSource implements CanvasInputSource {
     double swipeThreshold = 0.0,
     Duration longPressDuration = Duration.zero,
     Duration doubleTapWindow = const Duration(milliseconds: 300),
-    int maxHands = 2,
+    this.maxHands = 2,
   }) {
     _recognizer = HandGestureRecognizer(
       pinchCloseThreshold: pinchCloseThreshold,
@@ -53,6 +53,12 @@ final class GestureInputSource implements CanvasInputSource {
   }
 
   final void Function(Object, StackTrace)? onError;
+
+  /// Maximum number of hands the backend should detect simultaneously.
+  ///
+  /// Stored so callers can query the configured value and pass it to their
+  /// [LandmarkProvider] implementation (e.g. to configure a native ML model).
+  final int maxHands;
 
   /// Optional native hand-detection backend.
   ///
@@ -172,7 +178,9 @@ final class GestureInputSource implements CanvasInputSource {
     if (secondGesture != RecognizedGesture.none &&
         secondGesture != _lastSecondGesture) {
       if (!_controller.isClosed) {
-        _controller.add(CanvasGestureEvent(gesture: secondGesture));
+        _controller.add(
+          CanvasGestureEvent(gesture: secondGesture, isSecondHand: true),
+        );
       }
     }
     _lastSecondGesture = secondGesture;

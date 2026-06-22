@@ -314,6 +314,9 @@ final class HandGestureRecognizer {
           _yFilter.reset();
           _dwellElapsedS = 0;
           _mustMoveBeforeDwell = false;
+          // Invalidate the inter-tap timer so a tap in the next session never
+          // chains as a double-tap against a tap from before the session loss.
+          _timeSinceLastDwellS = double.infinity;
         }
         return const [];
     }
@@ -341,6 +344,9 @@ final class HandGestureRecognizer {
     }
 
     // _phase is now guaranteed to be hovering or down.
+    // Advance the inter-tap timer on every active frame so the double-tap
+    // window correctly accounts for time spent in pinch-drag and scroll phases.
+    if (_dwellThresholdS > 0) _timeSinceLastDwellS += dt;
     final thumb = landmarks.getLandmark(HandLandmarkType.thumbTip);
     final index = landmarks.getLandmark(HandLandmarkType.indexTip);
     final dx = thumb.x - index.x;
@@ -559,8 +565,6 @@ final class HandGestureRecognizer {
   List<PointerInputEvent> _checkDwellEvents(Offset position, double dt) {
     if (_dwellThresholdS <= 0 && _longPressDurationS <= 0) return const [];
 
-    _timeSinceLastDwellS += dt;
-
     if (_mustMoveBeforeDwell) {
       if ((position - _dwellAnchor).distance >= dwellRadius) {
         _mustMoveBeforeDwell = false;
@@ -590,7 +594,10 @@ final class HandGestureRecognizer {
       _dwellElapsedS = 0;
       _mustMoveBeforeDwell = true;
       final isDouble = _timeSinceLastDwellS <= _doubleTapWindowS;
-      _timeSinceLastDwellS = 0;
+      // After a double-tap, invalidate the timer so a third rapid dwell cannot
+      // chain into another double-tap. After a single tap, reset to 0 so the
+      // next dwell can qualify as a double-tap if it arrives within the window.
+      _timeSinceLastDwellS = isDouble ? double.infinity : 0;
       return isDouble
           ? [
               CanvasTapEvent(position: position),

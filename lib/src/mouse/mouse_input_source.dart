@@ -163,12 +163,15 @@ class _MouseSurfaceState extends State<_MouseSurface> {
           _lastTapTime = now;
         }
       } else {
+        _lastTapTime = null;
         _emit(CanvasUpEvent(position: _dragLastPosition));
       }
     }
   }
 
   void _onPointerCancel(flutter_gestures.PointerCancelEvent e) {
+    _isPinchZooming = false;
+    _lastTapTime = null;
     if (_hasDragStarted) {
       _hasDragStarted = false;
       _emit(const CanvasCancelEvent());

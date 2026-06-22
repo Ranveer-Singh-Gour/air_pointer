@@ -1,3 +1,40 @@
+## 0.2.1
+
+### Bug fixes
+
+- **`MouseInputSource`** — `_lastTapTime` is now cleared in the drag path of
+  `_onScaleEnd` so a tap followed by a quick drag no longer poisons the
+  double-tap window for the next genuine tap.
+- **`MouseInputSource`** — `_onPointerCancel` now resets `_isPinchZooming` and
+  `_lastTapTime` so an OS-interrupted gesture cannot leave the source in
+  pinch-zoom mode (causing the next tap to be swallowed as `CanvasScaleEndEvent`)
+  or produce a spurious `CanvasDoubleTapEvent`.
+- **`HandGestureRecognizer`** — the inter-tap timer (`_timeSinceLastDwellS`)
+  now advances during `GesturePhase.down` (pinch-drag) and pointing-finger
+  scroll so time spent in those phases correctly counts toward the double-tap
+  window.
+- **`HandGestureRecognizer`** — `_timeSinceLastDwellS` is reset to
+  `double.infinity` when grace expires, preventing a stale tap from a previous
+  tracking session from chaining as a double-tap on re-entry.
+- **`HandGestureRecognizer`** — after a `CanvasDoubleTapEvent` fires,
+  `_timeSinceLastDwellS` is reset to `double.infinity` instead of `0`,
+  matching `MouseInputSource` behaviour (a third rapid dwell no longer emits a
+  second double-tap).
+- **`GestureInputSource` (native)** — `maxHands` constructor parameter is now
+  stored as a readable `final int maxHands` field instead of being silently
+  discarded; callers can query it when configuring their `LandmarkProvider`.
+- **`CanvasGestureEvent`** — new `isSecondHand` field (`bool`, default `false`)
+  distinguishes primary-hand gestures from secondary-hand gestures; both
+  `GestureInputSource` backends now set `isSecondHand: true` on secondary-hand
+  emissions.
+- **`GestureInputSource` (web)** — `classifyGesture` is no longer called twice
+  per frame per hand; the already-computed locals are reused when building
+  `GestureDebugInfo`.
+- **`GestureInputSource` (web)** — `recognized_gesture.dart` import sorted to
+  correct alphabetical position (lint: `directives_ordering`).
+
+---
+
 ## 0.2.0
 
 ### New events

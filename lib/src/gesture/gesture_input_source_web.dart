@@ -7,11 +7,11 @@ import 'package:air_pointer/src/boundary/canvas_input_source.dart';
 import 'package:air_pointer/src/events/pointer_input_event.dart';
 import 'package:air_pointer/src/gesture/calibration_result.dart';
 import 'package:air_pointer/src/gesture/gesture_classifier.dart';
-import 'package:air_pointer/src/gesture/recognized_gesture.dart';
 import 'package:air_pointer/src/gesture/gesture_phase.dart';
 import 'package:air_pointer/src/gesture/hand_gesture_recognizer.dart';
 import 'package:air_pointer/src/gesture/hand_landmark_point.dart';
 import 'package:air_pointer/src/gesture/hand_tracking_status.dart';
+import 'package:air_pointer/src/gesture/recognized_gesture.dart';
 import 'package:flutter/widgets.dart';
 import 'package:web/web.dart' as web;
 
@@ -380,7 +380,7 @@ final class GestureInputSource implements CanvasInputSource {
         final secondGesture = classifyGesture(secondLms);
         if (secondGesture != RecognizedGesture.none &&
             secondGesture != _lastSecondGesture) {
-          _emit(CanvasGestureEvent(gesture: secondGesture));
+          _emit(CanvasGestureEvent(gesture: secondGesture, isSecondHand: true));
         }
         _lastSecondGesture = secondGesture;
 
@@ -405,8 +405,8 @@ final class GestureInputSource implements CanvasInputSource {
             isTwoHandActive: result.debug.isTwoHandActive,
             handedness: _parseHandedness(handednesses, 0),
             secondHandedness: _parseHandedness(handednesses, 1),
-            detectedGesture: classifyGesture(lms),
-            secondHandGesture: classifyGesture(secondLms),
+            detectedGesture: gesture,
+            secondHandGesture: secondGesture,
             dwellProgress: result.debug.dwellProgress,
             isPointing: result.debug.isPointing,
             workerLatencyMs: workerLatencyMs,

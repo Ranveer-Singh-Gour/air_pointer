@@ -1,4 +1,5 @@
 import 'package:air_pointer_example/src/netflix_canvas.dart';
+import 'package:air_pointer_example/src/room_3d_canvas.dart';
 import 'package:air_pointer_example/src/sandbox_canvas.dart';
 import 'package:flutter/material.dart';
 
@@ -29,13 +30,17 @@ class _HomePageState extends State<_HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor:
-          _tab == 0 ? const Color(0xFF141414) : kCanvasBackground,
+      backgroundColor: _tab == 0
+          ? const Color(0xFF141414)
+          : _tab == 2
+              ? const Color(0xFF1C1917)
+              : kCanvasBackground,
       body: IndexedStack(
         index: _tab,
         children: const [
           NetflixCanvas(),
           SandboxCanvas(),
+          Room3DCanvas(),
         ],
       ),
       bottomNavigationBar: NavigationBar(
@@ -53,6 +58,11 @@ class _HomePageState extends State<_HomePage> {
             icon: Icon(Icons.dashboard_outlined),
             selectedIcon: Icon(Icons.dashboard),
             label: 'Sandbox',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.chair_outlined),
+            selectedIcon: Icon(Icons.chair),
+            label: 'Room 3D',
           ),
         ],
       ),

@@ -1,0 +1,52 @@
+# Publishes to pub.dev when a version tag (v1.2.3) is pushed.
+#
+# Uses GitHub OIDC — no long-lived secrets. One-time setup required on pub.dev:
+# Admin → Automated publishing → enable GitHub Actions for this repository
+# with tag pattern `v{{version}}`.
+name: Publish to pub.dev
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      id-token: write # required for pub.dev OIDC token exchange
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup-dart exchanges the OIDC token for pub.dev credentials; the Dart
+      # SDK it installs is then superseded by the Flutter-bundled one below.
+      - uses: dart-lang/setup-dart@v1
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.2'
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      - name: Verify tag matches pubspec version
+        run: |
+          PUBSPEC_VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: *//')
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PUBSPEC_VERSION" != "$TAG_VERSION" ]; then
+            echo "Tag v$TAG_VERSION does not match pubspec version $PUBSPEC_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Publish
+        run: flutter pub publish --force

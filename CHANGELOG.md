@@ -1,3 +1,21 @@
+## 0.2.3 (unreleased)
+
+### Bug fixes
+
+- **Release-build latency logging removed** — the per-60-frame latency
+  `debugPrint` in the web `GestureInputSource` now only runs in debug builds
+  (`kDebugMode`); it previously logged to the console in release builds too.
+- **Wasm compilation selects the web implementation** — the conditional export
+  for `GestureInputSource` now keys on `dart.library.js_interop` instead of the
+  legacy `dart.library.html`, so `flutter build web --wasm` gets the MediaPipe
+  implementation rather than the native stub.
+
+### New
+
+- **`GestureInputSource.workerUrl`** (web, default `'hand_tracker_worker.js'`)
+  — the inference worker script location is now configurable, for apps that
+  serve the worker from a subdirectory. Must be same-origin.
+
 ## 0.2.2
 
 ### Bug fixes

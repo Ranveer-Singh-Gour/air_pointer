@@ -8,6 +8,18 @@ came from.
 
 ---
 
+## Demo
+
+<!-- TODO: record a short screen capture of the example app (hand-tracking a
+     canvas) and drop it here, e.g.:
+     ![air_pointer demo](doc/demo.gif)
+     Keep it under ~5 MB so pub.dev renders it. -->
+
+Run the [example app](example/) in Chrome to see hand tracking, calibration,
+and the 3D room demo live: `cd example && flutter run -d chrome`.
+
+---
+
 ## Quick start
 
 ```dart
@@ -114,6 +126,13 @@ In `web/index.html`, before `flutter_bootstrap.js`:
 
 Place `hand_tracker_worker.js` (from `example/web/`) next to your
 `index.html`. The worker runs MediaPipe inference off the main thread.
+
+To serve the worker from a different path, pass `workerUrl` (must be
+same-origin):
+
+```dart
+GestureInputSource(workerUrl: 'workers/hand_tracker_worker.js')
+```
 
 ### 3. Initialize the source
 
@@ -545,11 +564,12 @@ For offline or CSP-restricted deployments, self-host both assets:
 GestureInputSource(
   mediaPipeBaseUrl: '/mediapipe/',   // serves vision_bundle.js + WASM files
   modelAssetUrl: '/mediapipe/hand_landmarker.task',
+  workerUrl: 'hand_tracker_worker.js',  // default; override to relocate
 )
 ```
 
 Use `scripts/download_mediapipe.sh` to fetch the pinned versions into
-`example/web/mediapipe/`. Both parameters are **Flutter Web only** — they have
+`example/web/mediapipe/`. These parameters are **Flutter Web only** — they have
 no effect on native builds and do not exist on `GestureInputSource` native stub.
 
 ---

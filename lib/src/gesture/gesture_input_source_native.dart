@@ -79,6 +79,8 @@ final class GestureInputSource implements CanvasInputSource {
   final StreamController<HandTrackingStatus> _statusController =
       StreamController.broadcast();
 
+  /// Stream of per-frame debug snapshots: gesture phase, pinch distance,
+  /// landmarks, and latency. Use this to drive a debug overlay.
   Stream<GestureDebugInfo> get debugInfo => _debugController.stream;
 
   /// Lifecycle stream: initializing → cameraReady → tracking ⇄ lost → error.
@@ -97,11 +99,18 @@ final class GestureInputSource implements CanvasInputSource {
   RecognizedGesture _lastGesture = RecognizedGesture.none;
   RecognizedGesture _lastSecondGesture = RecognizedGesture.none;
 
+  /// Pointer events produced by the gesture recognizer. Broadcast stream;
+  /// only emits when a [LandmarkProvider] is configured.
   @override
   Stream<PointerInputEvent> get events => _controller.stream;
 
+  /// Sets the canvas size used to map normalized landmark coordinates to
+  /// pixel positions. Call whenever the target canvas is laid out or resized.
   void updateCanvasSize(Size size) => _canvasSize = size;
 
+  /// Applies per-user detection thresholds from a completed calibration.
+  ///
+  /// Safe to call at any time; takes effect on the next processed frame.
   void applyCalibration(CalibrationResult result) =>
       _recognizer.setThresholds(result);
 
@@ -119,6 +128,12 @@ final class GestureInputSource implements CanvasInputSource {
         predictionHorizon: predictionHorizon,
       );
 
+  /// Starts listening to the configured [LandmarkProvider] and begins
+  /// emitting events. No-op when no provider is set. Idempotent —
+  /// subsequent calls are no-ops.
+  ///
+  /// Provider stream errors are reported via [onError] and as
+  /// [HandTrackingError] on [statusStream] rather than thrown.
   Future<void> initialize() async {
     final provider = landmarkProvider;
     if (provider == null || _frameSub != null) return;
@@ -226,9 +241,12 @@ final class GestureInputSource implements CanvasInputSource {
     }
   }
 
+  /// Gesture input needs no wrapping listener — returns [child] unchanged.
   @override
   Widget buildSurface({required Widget child}) => child;
 
+  /// Returns the provider's camera preview widget, or an empty box when no
+  /// [LandmarkProvider] is configured.
   Widget buildCameraPreview({double? width, double? height}) =>
       landmarkProvider?.buildPreview(width: width, height: height) ??
       const SizedBox.shrink();

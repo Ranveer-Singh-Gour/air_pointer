@@ -4,7 +4,7 @@ publish_to: none
 
 environment:
   sdk: ^3.9.2
-  flutter: '>=3.29.0'
+  flutter: '>=3.44.0'
 
 dependencies:
   air_pointer:

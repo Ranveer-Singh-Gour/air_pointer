@@ -631,10 +631,17 @@ final class GestureInputSource implements CanvasInputSource {
   void dispose() {
     _disposed = true;
     _recognizer.reset();
-    // Ask the worker to close itself gracefully, then hard-terminate.
-    _worker?.postMessage({'type': 'dispose'}.jsify()!);
-    _worker?.terminate();
+    // Ask the worker to close itself gracefully (this releases MediaPipe's
+    // WASM/WebGL delegate). postMessage delivery is asynchronous, so
+    // terminating in the same tick would kill the worker before it ever
+    // processes the 'dispose' message — give it a short window to run its
+    // self.close(), then hard-terminate as a backstop in case it doesn't.
+    final worker = _worker;
     _worker = null;
+    if (worker != null) {
+      worker.postMessage({'type': 'dispose'}.jsify()!);
+      Timer(const Duration(milliseconds: 50), worker.terminate);
+    }
     _previewVideo?.srcObject = null;
     _previewVideo = null;
     final video = _video;

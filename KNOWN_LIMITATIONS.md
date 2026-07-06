@@ -85,12 +85,17 @@ The WASM runtime (~4 MB) and `.task` model (~20 MB) load from
   populates during two-hand spread/pinch gestures. `MouseInputSource` always
   emits `rotation: 0.0` — Flutter's `ScaleGestureRecognizer` does not expose a
   rotation delta for two-finger trackpad gestures.
-- **No velocity prediction** — the 1€ filter reduces jitter but adds latency.
-  A Kalman-based predictor would recover some of that latency but is not
-  implemented.
-- **No left/right handedness distinction** — both hands are treated
-  identically. Which hand is `landmarks[0]` vs `landmarks[1]` is determined
-  by MediaPipe's internal ordering, not user preference.
+- **Velocity prediction has limits** — `GestureInputSource`/`HandGestureRecognizer`
+  support a `predictionHorizon` that projects the 1€ filter's velocity estimate
+  forward to offset the filter's inherent lag. It is a simple linear
+  extrapolation, not a Kalman-based predictor, so it works best for steady
+  motion and can overshoot on sudden direction changes.
+- **Handedness is exposed but not used for hand selection** — MediaPipe's
+  handedness classification is parsed and surfaced via
+  `HandDetectionFrame.handedness` / `GestureDebugInfo.handedness`, but
+  two-hand mode does not use it to decide which detected hand is treated as
+  "hand1" vs "hand2" — that's determined by the backend's return order, not
+  user preference.
 - **`CanvasCancelEvent` carries no position** — mid-drag cancels do not
   include the last cursor position. Consumers should cache the last
   `CanvasMoveEvent` position if they need it for rollback animations.

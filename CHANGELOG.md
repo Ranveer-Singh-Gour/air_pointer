@@ -25,6 +25,15 @@
   never ran. `dispose()` now gives the worker a short window to shut itself
   down gracefully before terminating it as a backstop.
 
+### Performance
+
+- **Skip debug-only work when nobody's listening** (web) — `GestureInputSource`
+  parsed `worldLandmarks`, computed per-hand bounding boxes, and built a full
+  `GestureDebugInfo` snapshot on every processed frame regardless of whether
+  anything was subscribed to `debugInfo`. That work now only runs when
+  `debugInfo` has an active listener, avoiding needless per-frame allocation
+  for consumers who don't use the debug stream.
+
 ### New
 
 - **`GestureInputSource.workerUrl`** (web, default `'hand_tracker_worker.js'`)

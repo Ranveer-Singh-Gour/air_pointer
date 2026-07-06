@@ -381,12 +381,8 @@ final class GestureInputSource implements CanvasInputSource {
         _prevTimestampMs = tsMs;
 
         // Convert JS-dartified hand arrays to HandLandmarkPoint lists.
-        final handednesses = raw['handednesses'] as List?;
-        final worldHandsRaw = raw['worldHands'] as List?;
         List<HandLandmarkPoint>? lms;
         List<HandLandmarkPoint>? secondLms;
-        List<HandLandmarkPoint> worldLms = const [];
-        List<HandLandmarkPoint> secondWorldLms = const [];
         if (hands != null) {
           List<HandLandmarkPoint> parseHand(List<Object?> raw) =>
               raw.map((pt) {
@@ -401,24 +397,6 @@ final class GestureInputSource implements CanvasInputSource {
           if (hands.isNotEmpty) lms = parseHand(hands[0] as List<Object?>);
           if (hands.length >= 2) {
             secondLms = parseHand(hands[1] as List<Object?>);
-          }
-        }
-        if (worldHandsRaw != null) {
-          List<HandLandmarkPoint> parseWorld(List<Object?> raw) =>
-              raw.map((pt) {
-                final m = pt as Map<Object?, Object?>;
-                return HandLandmarkPoint(
-                  (m['x'] as num).toDouble(),
-                  (m['y'] as num).toDouble(),
-                  (m['z'] as num).toDouble(),
-                  visibility: (m['visibility'] as num?)?.toDouble() ?? 1.0,
-                );
-              }).toList();
-          if (worldHandsRaw.isNotEmpty) {
-            worldLms = parseWorld(worldHandsRaw[0] as List<Object?>);
-          }
-          if (worldHandsRaw.length >= 2) {
-            secondWorldLms = parseWorld(worldHandsRaw[1] as List<Object?>);
           }
         }
 
@@ -458,7 +436,32 @@ final class GestureInputSource implements CanvasInputSource {
           }
           _wasTracking = nowTracking;
         }
-        if (!_debugController.isClosed) {
+        // World landmarks, bounding boxes, and handedness are only consumed
+        // by GestureDebugInfo — skip parsing/computing them when nothing is
+        // listening to debugInfo.
+        if (_debugController.hasListener) {
+          final handednesses = raw['handednesses'] as List?;
+          final worldHandsRaw = raw['worldHands'] as List?;
+          List<HandLandmarkPoint> worldLms = const [];
+          List<HandLandmarkPoint> secondWorldLms = const [];
+          if (worldHandsRaw != null) {
+            List<HandLandmarkPoint> parseWorld(List<Object?> raw) =>
+                raw.map((pt) {
+                  final m = pt as Map<Object?, Object?>;
+                  return HandLandmarkPoint(
+                    (m['x'] as num).toDouble(),
+                    (m['y'] as num).toDouble(),
+                    (m['z'] as num).toDouble(),
+                    visibility: (m['visibility'] as num?)?.toDouble() ?? 1.0,
+                  );
+                }).toList();
+            if (worldHandsRaw.isNotEmpty) {
+              worldLms = parseWorld(worldHandsRaw[0] as List<Object?>);
+            }
+            if (worldHandsRaw.length >= 2) {
+              secondWorldLms = parseWorld(worldHandsRaw[1] as List<Object?>);
+            }
+          }
           _debugController.add(GestureDebugInfo(
             phase: result.debug.phase,
             pinchDistance: result.debug.pinchDistance,

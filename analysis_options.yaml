@@ -42,4 +42,3 @@ dart_code_linter:
     - lib/**/touch_input_source.dart
     - lib/**/gesture_input_source_web.dart
     - lib/**/gesture_input_source_native.dart
-    - lib/**/hand_landmarker_js.dart

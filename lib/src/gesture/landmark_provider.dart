@@ -90,14 +90,23 @@ final class HandDetectionFrame {
 /// - **iOS / macOS**: `NSCameraUsageDescription` in `Info.plist`
 ///
 /// ## Minimal implementation with `hand_detection`
+///
+/// `hand_detection`'s own `Handedness` and `HandLandmarkType` types share
+/// their names with air_pointer's — alias the import to avoid a collision.
+/// Its `Hand.landmarks` are in the *original image's pixel space* (not
+/// normalised), so divide by the source frame's width/height before handing
+/// them to [HandLandmarkPoint]. Camera streams should go through
+/// `detectFromCameraImage` (not `detect`, which takes decoded image bytes).
 /// ```dart
-/// import 'package:hand_detection/hand_detection.dart';
 /// import 'package:camera/camera.dart';
+/// import 'package:hand_detection/hand_detection.dart' as hd;
 ///
 /// class HandDetectionProvider implements LandmarkProvider {
-///   HandDetectionProvider({required this.detector, required this.camera});
+///   HandDetectionProvider({required this.detector, required this.camera}) {
+///     camera.startImageStream(_onFrame);
+///   }
 ///
-///   final HandDetector detector;
+///   final hd.HandDetector detector;
 ///   final CameraController camera;
 ///
 ///   final _ctrl = StreamController<HandDetectionFrame>.broadcast();
@@ -105,12 +114,31 @@ final class HandDetectionFrame {
 ///   @override
 ///   Stream<HandDetectionFrame> get frames => _ctrl.stream;
 ///
-///   void processImage(CameraImage image) async {
-///     final hand = await detector.detect(image);
-///     if (hand == null) { _ctrl.add(const HandDetectionFrame()); return; }
+///   Future<void> _onFrame(CameraImage image) async {
+///     // Pass `rotation: rotationForFrame(...)` on Android/iOS so the
+///     // detector sees an upright frame; desktop frames are always upright.
+///     final hands = await detector.detectFromCameraImage(image, maxDim: 640);
+///     if (hands.isEmpty) {
+///       _ctrl.add(const HandDetectionFrame());
+///       return;
+///     }
+///     final hand = hands.first;
 ///     _ctrl.add(HandDetectionFrame(
-///       landmarks: hand.landmarks.map((p) =>
-///           HandLandmarkPoint(p.x, p.y, p.z)).toList(),
+///       landmarks: hd.HandLandmarkType.values
+///           .map(hand.getLandmark)
+///           .whereType<hd.HandLandmark>()
+///           .map((l) => HandLandmarkPoint(
+///                 l.x / image.width,
+///                 l.y / image.height,
+///                 l.z,
+///                 visibility: l.visibility,
+///               ))
+///           .toList(),
+///       handedness: switch (hand.handedness) {
+///         hd.Handedness.left => Handedness.left,
+///         hd.Handedness.right => Handedness.right,
+///         _ => Handedness.unknown,
+///       },
 ///     ));
 ///   }
 ///
@@ -119,7 +147,12 @@ final class HandDetectionFrame {
 ///       SizedBox(width: width, height: height, child: CameraPreview(camera));
 ///
 ///   @override
-///   void dispose() { detector.dispose(); camera.dispose(); _ctrl.close(); }
+///   void dispose() {
+///     camera.stopImageStream();
+///     detector.dispose();
+///     camera.dispose();
+///     _ctrl.close();
+///   }
 /// }
 /// ```
 abstract interface class LandmarkProvider {

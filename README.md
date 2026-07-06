@@ -10,13 +10,7 @@ came from.
 
 ## Demo
 
-<!-- TODO: record a short screen capture of the example app (hand-tracking a
-     canvas) and drop it here, e.g.:
-     ![air_pointer demo](doc/demo.gif)
-     Keep it under ~5 MB so pub.dev renders it. -->
-
-Run the [example app](example/) in Chrome to see hand tracking, calibration,
-and the 3D room demo live: `cd example && flutter run -d chrome`.
+https://github.com/user-attachments/assets/09bcbad6-3aef-4307-949a-20cbad5b4419
 
 ---
 

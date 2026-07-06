@@ -9,6 +9,14 @@
   for `GestureInputSource` now keys on `dart.library.js_interop` instead of the
   legacy `dart.library.html`, so `flutter build web --wasm` gets the MediaPipe
   implementation rather than the native stub.
+- **Corrected the `hand_detection` `LandmarkProvider` doc example** — the
+  sketch in `landmark_provider.dart` called `detector.detect(image)` with a
+  raw `CameraImage` (that method takes decoded image bytes; camera streams
+  need `detectFromCameraImage`) and treated `Hand.landmarks` as already
+  normalised, when `hand_detection` returns them in the source image's pixel
+  space. The example now uses the correct camera-streaming call, normalises
+  landmarks by the frame's width/height, and aliases `hand_detection`'s
+  `Handedness`/`HandLandmarkType` to avoid colliding with air_pointer's own.
 
 ### New
 

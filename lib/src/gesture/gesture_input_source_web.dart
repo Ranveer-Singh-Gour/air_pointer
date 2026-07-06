@@ -13,6 +13,7 @@ import 'package:air_pointer/src/gesture/hand_gesture_recognizer.dart';
 import 'package:air_pointer/src/gesture/hand_landmark_point.dart';
 import 'package:air_pointer/src/gesture/hand_tracking_status.dart';
 import 'package:air_pointer/src/gesture/recognized_gesture.dart';
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/widgets.dart';
 import 'package:web/web.dart' as web;
 
@@ -29,6 +30,7 @@ final class GestureInputSource implements CanvasInputSource {
     this.onError,
     this.mediaPipeBaseUrl,
     this.modelAssetUrl,
+    this.workerUrl = 'hand_tracker_worker.js',
     double pinchCloseThreshold = 0.05,
     double pinchOpenThreshold = 0.08,
     int pinchConfirmFrames = 1,
@@ -84,6 +86,11 @@ final class GestureInputSource implements CanvasInputSource {
   /// Cloud Storage default is used. Set to a local path (e.g.
   /// `'/mediapipe/models/hand_landmarker.task'`) to self-host the model.
   final String? modelAssetUrl;
+
+  /// URL of the inference worker script, resolved relative to the page.
+  /// Defaults to `'hand_tracker_worker.js'` at the web root. Override when
+  /// the worker is served from a different path (must be same-origin).
+  final String workerUrl;
 
   /// Maximum number of hands to detect per frame (1 or 2). Default 2.
   ///
@@ -149,6 +156,8 @@ final class GestureInputSource implements CanvasInputSource {
   // prevents one GC-able allocation per rAF tick (60/s in the hot path).
   late final JSFunction _captureLoopJS = _captureLoop.toJS;
 
+  /// Sets the canvas size used to map normalized landmark coordinates to
+  /// pixel positions. Call whenever the target canvas is laid out or resized.
   void updateCanvasSize(Size size) => _canvasSize = size;
 
   /// Applies per-user detection thresholds from a completed calibration.
@@ -171,6 +180,12 @@ final class GestureInputSource implements CanvasInputSource {
         predictionHorizon: predictionHorizon,
       );
 
+  /// Requests camera access, starts the MediaPipe inference worker, and
+  /// begins emitting events. Idempotent — subsequent calls are no-ops.
+  ///
+  /// Failures (permission denied, no camera, worker/CDN load errors) are
+  /// reported via [onError] and as [HandTrackingError] on [statusStream]
+  /// rather than thrown.
   Future<void> initialize() async {
     if (_initialized || _disposed) return;
     _initialized = true;
@@ -221,7 +236,7 @@ final class GestureInputSource implements CanvasInputSource {
       // (via its own ES module import) so the main thread stays clean.
       // Classic worker (no type:'module') so MediaPipe's WASM runtime can
       // call importScripts() for its internal sub-worker threads.
-      _worker = web.Worker('hand_tracker_worker.js'.toJS);
+      _worker = web.Worker(workerUrl.toJS);
       _worker!.onmessage = _onWorkerMessage.toJS;
       _worker!.onerror = ((web.Event event) {
         String detail;
@@ -232,7 +247,7 @@ final class GestureInputSource implements CanvasInputSource {
           detail = 'unknown error';
         }
         final err = StateError(
-          'hand_tracker_worker.js failed to load or threw an uncaught error. $detail',
+          '$workerUrl failed to load or threw an uncaught error. $detail',
         );
         if (!_hasErrored) {
           _hasErrored = true;
@@ -291,8 +306,8 @@ final class GestureInputSource implements CanvasInputSource {
     }
     // CORS rejection when serving the worker script from a different origin.
     if (rawMsg.contains('CORS') || rawMsg.contains('cross-origin')) {
-      return 'hand_tracker_worker.js blocked by CORS — serve it from the same '
-          'origin as index.html.';
+      return 'Hand tracker worker script blocked by CORS — serve it from the '
+          'same origin as index.html.';
     }
     return 'MediaPipe initialization failed: $rawMsg';
   }
@@ -350,8 +365,9 @@ final class GestureInputSource implements CanvasInputSource {
         final hands = raw['hands'] as List?;
 
         // Latency instrument: log every 60 frames (~2 s at 30 fps).
+        // Debug builds only — debugPrint is not stripped in release.
         _frameCount++;
-        if (_frameCount % 60 == 0) {
+        if (kDebugMode && _frameCount % 60 == 0) {
           debugPrint(
             '[air_pointer] frame=$_frameCount '
             'worker=${workerLatencyMs.toStringAsFixed(1)} ms '
@@ -473,9 +489,6 @@ final class GestureInputSource implements CanvasInputSource {
           _emitStatus(HandTrackingError(workerErr));
         }
         onError?.call(workerErr, StackTrace.current);
-
-      case 'init_error': // reserved for future typed worker errors
-        break;
     }
   }
 
@@ -605,9 +618,12 @@ final class GestureInputSource implements CanvasInputSource {
     if (!_statusController.isClosed) _statusController.add(status);
   }
 
+  /// Pointer events produced by the gesture recognizer. Broadcast stream;
+  /// starts emitting after [initialize] succeeds and a hand is tracked.
   @override
   Stream<PointerInputEvent> get events => _controller.stream;
 
+  /// Gesture input needs no wrapping listener — returns [child] unchanged.
   @override
   Widget buildSurface({required Widget child}) => child;
 

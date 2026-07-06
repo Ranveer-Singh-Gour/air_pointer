@@ -640,7 +640,7 @@ final class GestureInputSource implements CanvasInputSource {
     _worker = null;
     if (worker != null) {
       worker.postMessage({'type': 'dispose'}.jsify()!);
-      Timer(const Duration(milliseconds: 50), worker.terminate);
+      Timer(const Duration(milliseconds: 50), () => worker.terminate());
     }
     _previewVideo?.srcObject = null;
     _previewVideo = null;

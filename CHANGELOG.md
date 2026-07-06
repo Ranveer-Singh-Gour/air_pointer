@@ -9,6 +9,13 @@
   for `GestureInputSource` now keys on `dart.library.js_interop` instead of the
   legacy `dart.library.html`, so `flutter build web --wasm` gets the MediaPipe
   implementation rather than the native stub.
+- **Worker no longer killed before it can release MediaPipe resources** —
+  `GestureInputSource.dispose()` (web) posted a `'dispose'` message and called
+  `Worker.terminate()` in the same tick; since `postMessage` delivery is
+  asynchronous, the worker was always hard-terminated before it processed the
+  message, so `landmarker.close()` (which releases the WASM/WebGL delegate)
+  never ran. `dispose()` now gives the worker a short window to shut itself
+  down gracefully before terminating it as a backstop.
 
 ### New
 

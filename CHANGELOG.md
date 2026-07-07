@@ -1,4 +1,4 @@
-## 0.2.3 (unreleased)
+## 0.2.3
 
 ### Bug fixes
 
@@ -47,6 +47,8 @@
 - **`GestureInputSource.workerUrl`** (web, default `'hand_tracker_worker.js'`)
   — the inference worker script location is now configurable, for apps that
   serve the worker from a subdirectory. Must be same-origin.
+
+---
 
 ## 0.2.2
 

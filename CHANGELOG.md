@@ -33,6 +33,14 @@
   anything was subscribed to `debugInfo`. That work now only runs when
   `debugInfo` has an active listener, avoiding needless per-frame allocation
   for consumers who don't use the debug stream.
+- **Extend the debug-only skip to the worker itself** (web) — the previous
+  fix only gated main-thread parsing; the inference worker still built
+  `worldHands`/`handedness` and transferred them across the thread boundary
+  on every frame regardless of listener state. `GestureInputSource` now
+  tells the worker (via a new `setDebugEnabled` message, sent from
+  `debugInfo`'s `onListen`/`onCancel`) whether to compute that data at all,
+  and the main thread only dartifies the JS payload fields it actually needs
+  per frame instead of eagerly converting the whole message.
 
 ### New
 

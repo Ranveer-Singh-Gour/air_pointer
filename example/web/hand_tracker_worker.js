@@ -13,6 +13,7 @@
 //                    minHandPresenceConfidence?: number,
 //                    minTrackingConfidence?: number }
 //   main → worker  { type: 'detect',  frame: ImageBitmap, timestampMs: number }
+//   main → worker  { type: 'setDebugEnabled', enabled: boolean }
 //   main → worker  { type: 'dispose' }
 //
 //   worker → main  { type: 'ready' }
@@ -23,12 +24,18 @@
 //                    timestampMs: number, workerLatencyMs: number }
 //   worker → main  { type: 'error', message: string }
 //
+// worldHands/handednesses are only populated while debug mode is enabled
+// (see 'setDebugEnabled' below) — nobody consumes them otherwise, so the
+// worker skips computing and transferring that data across the thread
+// boundary until the main thread's debugInfo stream has a listener.
+//
 // Self-hosting: pass bundleUrl/wasmFolderUrl/modelUrl pointing to local assets
 // (e.g. downloaded by scripts/download_mediapipe.sh into example/web/mediapipe/).
 // CDN is the default when GestureInputSource is constructed without overrides.
 
 let landmarker = null;
 let initialized = false;
+let debugEnabled = false;
 
 self.onmessage = async (event) => {
   const { type } = event.data;
@@ -60,6 +67,12 @@ self.onmessage = async (event) => {
     return;
   }
 
+  // ── setDebugEnabled ──────────────────────────────────────────────────────
+  if (type === 'setDebugEnabled') {
+    debugEnabled = !!event.data.enabled;
+    return;
+  }
+
   // ── detect ────────────────────────────────────────────────────────────────
   if (type === 'detect') {
     const frame = event.data.frame;
@@ -82,13 +95,15 @@ self.onmessage = async (event) => {
       hands = result.landmarks.map(hand =>
         hand.map(({ x, y, z, visibility }) => ({ x, y, z, visibility }))
       );
-      worldHands = (result.worldLandmarks ?? []).map(hand =>
-        hand.map(({ x, y, z, visibility }) => ({ x, y, z, visibility }))
-      );
-      // handednesses is an array-of-arrays; take the top category per hand.
-      handednesses = (result.handednesses ?? []).map(
-        cats => cats[0]?.categoryName ?? 'Unknown'
-      );
+      if (debugEnabled) {
+        worldHands = (result.worldLandmarks ?? []).map(hand =>
+          hand.map(({ x, y, z, visibility }) => ({ x, y, z, visibility }))
+        );
+        // handednesses is an array-of-arrays; take the top category per hand.
+        handednesses = (result.handednesses ?? []).map(
+          cats => cats[0]?.categoryName ?? 'Unknown'
+        );
+      }
     } catch (_) {
       frame?.close();
       // Non-fatal — skipped frame. Reply with empty hands so lock is released.

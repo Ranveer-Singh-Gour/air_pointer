@@ -115,8 +115,13 @@ final class GestureInputSource implements CanvasInputSource {
 
   final StreamController<PointerInputEvent> _controller =
       StreamController.broadcast();
-  final StreamController<GestureDebugInfo> _debugController =
-      StreamController.broadcast();
+  // onListen/onCancel tell the worker whether anyone actually needs
+  // worldHands/handedness so it can skip building that data at the source.
+  late final StreamController<GestureDebugInfo> _debugController =
+      StreamController.broadcast(
+        onListen: () => _setDebugEnabled(true),
+        onCancel: () => _setDebugEnabled(false),
+      );
   final StreamController<HandTrackingStatus> _statusController =
       StreamController.broadcast();
 
@@ -144,6 +149,9 @@ final class GestureInputSource implements CanvasInputSource {
 
   // Set while the worker is processing a frame; prevents flooding the worker.
   bool _workerBusy = false;
+
+  // Mirrors whether the worker has been told to build worldHands/handedness.
+  bool _debugEnabled = false;
 
   Size _canvasSize = Size.zero;
 
@@ -269,6 +277,9 @@ final class GestureInputSource implements CanvasInputSource {
           'minTrackingConfidence': minTrackingConfidence,
         }.jsify()!,
       );
+      // A debugInfo listener may have attached before the worker existed —
+      // sync its current state now that there's a worker to tell.
+      if (_debugEnabled) _setDebugEnabled(true);
       // The rAF capture loop starts when the worker posts 'ready'.
     } catch (e, st) {
       _initialized = false;
@@ -284,6 +295,16 @@ final class GestureInputSource implements CanvasInputSource {
       }
       onError?.call(categorized, st);
     }
+  }
+
+  /// Tells the worker whether to build worldHands/handedness data at all.
+  /// Skips that extraction (and its cross-thread transfer cost) at the
+  /// source when nobody is listening to [debugInfo].
+  void _setDebugEnabled(bool enabled) {
+    _debugEnabled = enabled;
+    _worker?.postMessage(
+      {'type': 'setDebugEnabled', 'enabled': enabled}.jsify()!,
+    );
   }
 
   /// Maps a raw worker error string to a user-readable message.
@@ -347,9 +368,14 @@ final class GestureInputSource implements CanvasInputSource {
 
   void _onWorkerMessage(web.MessageEvent event) {
     if (_disposed) return;
-    final raw = event.data.dartify();
-    if (raw is! Map) return;
-    final type = raw['type'] as String?;
+    final data = event.data;
+    if (data == null || !data.isA<JSObject>()) return;
+    final obj = data as JSObject;
+    // dartify() recursively converts a whole JS value graph in one eager
+    // pass, so only the fields every message needs are read up front here;
+    // worldHands/handedness are dartified lazily, inside _maybeEmitDebugInfo,
+    // only when a debugInfo listener is actually present.
+    final type = obj.getProperty<JSString?>('type'.toJS)?.toDart;
 
     switch (type) {
       case 'ready':
@@ -359,10 +385,12 @@ final class GestureInputSource implements CanvasInputSource {
 
       case 'landmarks':
         _workerBusy = false;
-        final tsMs = (raw['timestampMs'] as num).toDouble();
-        final workerLatencyMs = (raw['workerLatencyMs'] as num? ?? 0).toDouble();
+        final tsMs = obj.getProperty<JSNumber>('timestampMs'.toJS).toDartDouble;
+        final workerLatencyMs =
+            obj.getProperty<JSNumber?>('workerLatencyMs'.toJS)?.toDartDouble ??
+                0;
         final roundTripMs = DateTime.now().millisecondsSinceEpoch - _lastSendMs;
-        final hands = raw['hands'] as List?;
+        final hands = obj.getProperty<JSAny?>('hands'.toJS)?.dartify() as List?;
 
         // Latency instrument: log every 60 frames (~2 s at 30 fps).
         // Debug builds only — debugPrint is not stripped in release.
@@ -384,19 +412,11 @@ final class GestureInputSource implements CanvasInputSource {
         List<HandLandmarkPoint>? lms;
         List<HandLandmarkPoint>? secondLms;
         if (hands != null) {
-          List<HandLandmarkPoint> parseHand(List<Object?> raw) =>
-              raw.map((pt) {
-                final m = pt as Map<Object?, Object?>;
-                return HandLandmarkPoint(
-                  (m['x'] as num).toDouble(),
-                  (m['y'] as num).toDouble(),
-                  (m['z'] as num).toDouble(),
-                  visibility: (m['visibility'] as num?)?.toDouble() ?? 1.0,
-                );
-              }).toList();
-          if (hands.isNotEmpty) lms = parseHand(hands[0] as List<Object?>);
+          if (hands.isNotEmpty) {
+            lms = _parseLandmarkList(hands[0] as List<Object?>);
+          }
           if (hands.length >= 2) {
-            secondLms = parseHand(hands[1] as List<Object?>);
+            secondLms = _parseLandmarkList(hands[1] as List<Object?>);
           }
         }
 
@@ -436,55 +456,21 @@ final class GestureInputSource implements CanvasInputSource {
           }
           _wasTracking = nowTracking;
         }
-        // World landmarks, bounding boxes, and handedness are only consumed
-        // by GestureDebugInfo — skip parsing/computing them when nothing is
-        // listening to debugInfo.
-        if (_debugController.hasListener) {
-          final handednesses = raw['handednesses'] as List?;
-          final worldHandsRaw = raw['worldHands'] as List?;
-          List<HandLandmarkPoint> worldLms = const [];
-          List<HandLandmarkPoint> secondWorldLms = const [];
-          if (worldHandsRaw != null) {
-            List<HandLandmarkPoint> parseWorld(List<Object?> raw) =>
-                raw.map((pt) {
-                  final m = pt as Map<Object?, Object?>;
-                  return HandLandmarkPoint(
-                    (m['x'] as num).toDouble(),
-                    (m['y'] as num).toDouble(),
-                    (m['z'] as num).toDouble(),
-                    visibility: (m['visibility'] as num?)?.toDouble() ?? 1.0,
-                  );
-                }).toList();
-            if (worldHandsRaw.isNotEmpty) {
-              worldLms = parseWorld(worldHandsRaw[0] as List<Object?>);
-            }
-            if (worldHandsRaw.length >= 2) {
-              secondWorldLms = parseWorld(worldHandsRaw[1] as List<Object?>);
-            }
-          }
-          _debugController.add(GestureDebugInfo(
-            phase: result.debug.phase,
-            pinchDistance: result.debug.pinchDistance,
-            landmarks: result.debug.landmarks,
-            secondHandLandmarks: result.debug.secondHandLandmarks,
-            worldLandmarks: worldLms,
-            secondWorldLandmarks: secondWorldLms,
-            isTwoHandActive: result.debug.isTwoHandActive,
-            handedness: _parseHandedness(handednesses, 0),
-            secondHandedness: _parseHandedness(handednesses, 1),
-            detectedGesture: gesture,
-            secondHandGesture: secondGesture,
-            dwellProgress: result.debug.dwellProgress,
-            isPointing: result.debug.isPointing,
-            workerLatencyMs: workerLatencyMs,
-            roundTripMs: roundTripMs,
-            boundingBox: _landmarkBounds(lms),
-            secondHandBoundingBox: _landmarkBounds(secondLms),
-          ));
-        }
+        _maybeEmitDebugInfo(
+          raw: obj,
+          base: result.debug,
+          gesture: gesture,
+          secondGesture: secondGesture,
+          lms: lms,
+          secondLms: secondLms,
+          workerLatencyMs: workerLatencyMs,
+          roundTripMs: roundTripMs,
+        );
 
       case 'error':
-        final rawMsg = raw['message'] as String? ?? 'unknown error';
+        final rawMsg =
+            obj.getProperty<JSString?>('message'.toJS)?.toDart ??
+                'unknown error';
         debugPrint('[air_pointer] MediaPipe init error: $rawMsg');
         final workerErr = StateError(_categorizeWorkerError(rawMsg));
         if (!_hasErrored) {
@@ -494,6 +480,70 @@ final class GestureInputSource implements CanvasInputSource {
         onError?.call(workerErr, StackTrace.current);
     }
   }
+
+  // World landmarks, bounding boxes, and handedness are only consumed by
+  // GestureDebugInfo — parsing/computing them (and dartifying the worker's
+  // worldHands/handednesses payload) is skipped entirely when nothing is
+  // listening to debugInfo.
+  void _maybeEmitDebugInfo({
+    required JSObject raw,
+    required GestureDebugInfo base,
+    required RecognizedGesture gesture,
+    required RecognizedGesture secondGesture,
+    required List<HandLandmarkPoint>? lms,
+    required List<HandLandmarkPoint>? secondLms,
+    required double workerLatencyMs,
+    required int roundTripMs,
+  }) {
+    if (!_debugController.hasListener) return;
+
+    final handednesses =
+        raw.getProperty<JSAny?>('handednesses'.toJS)?.dartify() as List?;
+    final worldHandsRaw =
+        raw.getProperty<JSAny?>('worldHands'.toJS)?.dartify() as List?;
+    List<HandLandmarkPoint> worldLms = const [];
+    List<HandLandmarkPoint> secondWorldLms = const [];
+    if (worldHandsRaw != null) {
+      if (worldHandsRaw.isNotEmpty) {
+        worldLms = _parseLandmarkList(worldHandsRaw[0] as List<Object?>);
+      }
+      if (worldHandsRaw.length >= 2) {
+        secondWorldLms = _parseLandmarkList(worldHandsRaw[1] as List<Object?>);
+      }
+    }
+    _debugController.add(GestureDebugInfo(
+      phase: base.phase,
+      pinchDistance: base.pinchDistance,
+      landmarks: base.landmarks,
+      secondHandLandmarks: base.secondHandLandmarks,
+      worldLandmarks: worldLms,
+      secondWorldLandmarks: secondWorldLms,
+      isTwoHandActive: base.isTwoHandActive,
+      handedness: _parseHandedness(handednesses, 0),
+      secondHandedness: _parseHandedness(handednesses, 1),
+      detectedGesture: gesture,
+      secondHandGesture: secondGesture,
+      dwellProgress: base.dwellProgress,
+      isPointing: base.isPointing,
+      workerLatencyMs: workerLatencyMs,
+      roundTripMs: roundTripMs,
+      boundingBox: _landmarkBounds(lms),
+      secondHandBoundingBox: _landmarkBounds(secondLms),
+    ));
+  }
+
+  // Shared by both the primary-hand ('hands') and world-space ('worldHands')
+  // landmark payloads — both are lists of {x,y,z,visibility} maps.
+  static List<HandLandmarkPoint> _parseLandmarkList(List<Object?> raw) =>
+      raw.map((pt) {
+        final m = pt as Map<Object?, Object?>;
+        return HandLandmarkPoint(
+          (m['x'] as num).toDouble(),
+          (m['y'] as num).toDouble(),
+          (m['z'] as num).toDouble(),
+          visibility: (m['visibility'] as num?)?.toDouble() ?? 1.0,
+        );
+      }).toList();
 
   static Handedness _parseHandedness(List<Object?>? list, int index) {
     if (list == null || index >= list.length) return Handedness.unknown;

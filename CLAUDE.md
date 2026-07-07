@@ -62,7 +62,8 @@ and WASM files at `<base>/wasm/`.
 | Default grace frames | `5` | `HandGestureRecognizer` |
 
 When bumping the MediaPipe pin, verify the worker message protocol has not
-changed (the `detect` / `landmarks` / `error` / `ready` message types).
+changed (the `detect` / `landmarks` / `error` / `ready` / `setDebugEnabled`
+message types).
 
 ## Changing public API
 

@@ -1,3 +1,47 @@
+## 0.2.4 (unreleased)
+
+### Bug fixes
+
+- **Stale debug-info frame right after enabling the debug overlay** (web) —
+  the worker's `setDebugEnabled` message is fire-and-forget and could queue
+  behind a `detect` frame that was already in-flight, so that one frame's
+  reply carried an empty `worldHands`/`handednesses` payload even though a
+  hand was tracked. `GestureInputSource` now snapshots the desired state at
+  the moment each frame is sent and skips populating `worldLandmarks`/
+  `handedness` from the one reply that predates the sync, instead of
+  publishing a snapshot that looked like no hand was present.
+- **Unsafe non-nullable cast on `timestampMs`** (web) — the worker message
+  handler read `timestampMs` via a non-nullable `getProperty<JSNumber>`,
+  which performs no runtime check and would silently pass through `NaN`
+  instead of failing if a message ever omitted the field (relevant for
+  self-hosted/custom `workerUrl` scripts). It's now read nullably and the
+  frame is skipped with a debug-mode log if the field is missing.
+
+### New
+
+- **`GestureInputSource.setDebugOverlayEnabled(bool)`** — explicitly
+  controls whether the web worker computes the expensive `worldLandmarks`/
+  `secondWorldLandmarks`/`handedness`/`secondHandedness` fields of
+  `GestureDebugInfo`. Previously this was tied to whether `debugInfo` had
+  *any* listener, but the example app's own screens listen to `debugInfo`
+  continuously just for the cheap `phase`/`dwellProgress`/`isPointing`
+  fields (ordinary cursor UI state, not a debug overlay), which meant the
+  worker never actually stopped building world-landmark data for the
+  session — defeating the 0.2.3 "gate debug info on listener" optimization
+  for those screens. `debugInfo` now always includes the cheap fields;
+  call `setDebugOverlayEnabled(true)` only while something that reads the
+  expensive fields (e.g. a debug overlay) is visible. Present as a no-op on
+  the native platform for API parity — there's no cross-thread extraction
+  step to gate there.
+
+### Internal
+
+- Removed the `_debugEnabled` mirror field in `GestureInputSource` (web) —
+  it duplicated stream/flag state that's now read directly.
+- Extracted the repeated `getProperty<JSAny?>(key).dartify() as List?`
+  pattern (used for `hands`, `handednesses`, and `worldHands`) into a
+  shared `_jsList` helper.
+
 ## 0.2.3
 
 ### Bug fixes

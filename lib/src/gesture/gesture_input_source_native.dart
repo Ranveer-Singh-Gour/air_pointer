@@ -80,7 +80,10 @@ final class GestureInputSource implements CanvasInputSource {
       StreamController.broadcast();
 
   /// Stream of per-frame debug snapshots: gesture phase, pinch distance,
-  /// landmarks, and latency. Use this to drive a debug overlay.
+  /// landmarks, dwell/pointing state, and latency. Use this to drive a debug
+  /// overlay. Unlike the web implementation, every field (including
+  /// worldLandmarks/handedness) is always populated here — see
+  /// [setDebugOverlayEnabled].
   Stream<GestureDebugInfo> get debugInfo => _debugController.stream;
 
   /// Lifecycle stream: initializing → cameraReady → tracking ⇄ lost → error.
@@ -113,6 +116,18 @@ final class GestureInputSource implements CanvasInputSource {
   /// Safe to call at any time; takes effect on the next processed frame.
   void applyCalibration(CalibrationResult result) =>
       _recognizer.setThresholds(result);
+
+  /// Controls whether the backend computes the expensive `worldLandmarks`/
+  /// `secondWorldLandmarks`/`handedness`/`secondHandedness` fields of
+  /// [GestureDebugInfo].
+  ///
+  /// No-op on this platform: [debugInfo] always includes whatever the
+  /// configured [LandmarkProvider] reports on each [HandDetectionFrame] —
+  /// there's no cross-thread extraction step to gate here the way the web
+  /// backend's inference worker has. Present for API parity with the web
+  /// implementation, so calling code doesn't need platform-conditional
+  /// branches around it.
+  void setDebugOverlayEnabled(bool enabled) {}
 
   /// Updates the cursor-position smoothing filter.
   ///

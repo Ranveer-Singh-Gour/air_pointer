@@ -25,9 +25,11 @@
 //   worker → main  { type: 'error', message: string }
 //
 // worldHands/handednesses are only populated while debug mode is enabled
-// (see 'setDebugEnabled' below) — nobody consumes them otherwise, so the
-// worker skips computing and transferring that data across the thread
-// boundary until the main thread's debugInfo stream has a listener.
+// (see 'setDebugEnabled' below) — the worker skips computing and
+// transferring that data across the thread boundary until the main thread
+// calls GestureInputSource.setDebugOverlayEnabled(true), which is
+// independent of whether debugInfo has a listener (many consumers listen to
+// debugInfo just for the cheap phase/dwellProgress/isPointing fields).
 //
 // Self-hosting: pass bundleUrl/wasmFolderUrl/modelUrl pointing to local assets
 // (e.g. downloaded by scripts/download_mediapipe.sh into example/web/mediapipe/).

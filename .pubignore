@@ -1,0 +1,4 @@
+# Standalone macOS product app built on top of this package — not part of
+# the published air_pointer library. Depends on air_pointer via a local path
+# dependency; see app/README.md.
+app/

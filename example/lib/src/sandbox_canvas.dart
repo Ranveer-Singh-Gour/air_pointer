@@ -330,6 +330,7 @@ class _SandboxCanvasState extends State<SandboxCanvas>
                         _showDebug = !_showDebug;
                         if (!_showDebug) _debugInfo = null;
                       });
+                      _gestureSource.setDebugOverlayEnabled(_showDebug);
                     },
                     iconOn: Icons.bug_report_rounded,
                     iconOff: Icons.bug_report_outlined,

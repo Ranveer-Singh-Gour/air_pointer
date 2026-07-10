@@ -115,18 +115,21 @@ final class GestureInputSource implements CanvasInputSource {
 
   final StreamController<PointerInputEvent> _controller =
       StreamController.broadcast();
-  // onListen/onCancel tell the worker whether anyone actually needs
-  // worldHands/handedness so it can skip building that data at the source.
-  late final StreamController<GestureDebugInfo> _debugController =
-      StreamController.broadcast(
-        onListen: () => _setDebugEnabled(true),
-        onCancel: () => _setDebugEnabled(false),
-      );
+  final StreamController<GestureDebugInfo> _debugController =
+      StreamController.broadcast();
   final StreamController<HandTrackingStatus> _statusController =
       StreamController.broadcast();
 
   /// Stream of per-frame debug snapshots: gesture phase, pinch distance,
-  /// landmarks, and latency. Use this to drive a debug overlay.
+  /// landmarks, dwell/pointing state, and latency. Cheap fields (phase,
+  /// pinchDistance, dwellProgress, isPointing, detectedGesture, ...) are
+  /// always included and safe to use for continuous cursor UI. The
+  /// expensive fields — worldLandmarks, secondWorldLandmarks, handedness,
+  /// secondHandedness — are only populated while [setDebugOverlayEnabled]
+  /// is on; otherwise they read as empty/[Handedness.unknown]. Subscribing
+  /// to this stream does not by itself enable that expensive computation —
+  /// call [setDebugOverlayEnabled] when a debug overlay reading those
+  /// fields is actually visible.
   Stream<GestureDebugInfo> get debugInfo => _debugController.stream;
 
   /// Lifecycle stream: initializing → cameraReady → tracking ⇄ lost → error.
@@ -150,8 +153,20 @@ final class GestureInputSource implements CanvasInputSource {
   // Set while the worker is processing a frame; prevents flooding the worker.
   bool _workerBusy = false;
 
-  // Mirrors whether the worker has been told to build worldHands/handedness.
-  bool _debugEnabled = false;
+  // Whether the worker has been told (via setDebugOverlayEnabled) to build
+  // worldHands/handedness. Independent of whether debugInfo has a listener —
+  // many consumers subscribe to debugInfo just for the cheap per-frame
+  // fields (phase, dwellProgress, isPointing) and never want this data.
+  bool _debugOverlayEnabled = false;
+
+  // Snapshot of _debugOverlayEnabled taken at the moment the in-flight
+  // 'detect' frame was sent. The worker's 'setDebugEnabled' message is
+  // fire-and-forget and can queue behind a 'detect' that was already
+  // dispatched, so the worker may reply to that frame with its still-stale
+  // debug flag. Comparing this snapshot against the current desired state in
+  // _maybeEmitDebugInfo detects that one-frame staleness window so we can
+  // skip populating world-landmark fields with misleading empty data.
+  bool _debugWantedAtLastSend = false;
 
   Size _canvasSize = Size.zero;
 
@@ -277,9 +292,9 @@ final class GestureInputSource implements CanvasInputSource {
           'minTrackingConfidence': minTrackingConfidence,
         }.jsify()!,
       );
-      // A debugInfo listener may have attached before the worker existed —
-      // sync its current state now that there's a worker to tell.
-      if (_debugEnabled) _setDebugEnabled(true);
+      // setDebugOverlayEnabled may have been called before the worker
+      // existed — sync its current state now that there's a worker to tell.
+      _setDebugEnabled(_debugOverlayEnabled);
       // The rAF capture loop starts when the worker posts 'ready'.
     } catch (e, st) {
       _initialized = false;
@@ -297,11 +312,29 @@ final class GestureInputSource implements CanvasInputSource {
     }
   }
 
+  /// Controls whether the worker computes the expensive `worldLandmarks`/
+  /// `secondWorldLandmarks`/`handedness`/`secondHandedness` fields of
+  /// [GestureDebugInfo]. Off by default.
+  ///
+  /// The cheap fields on [debugInfo] (phase, pinchDistance, dwellProgress,
+  /// isPointing, detectedGesture, ...) are computed on the main thread from
+  /// every frame regardless of this flag, so consumers that only need
+  /// continuous cursor state can subscribe to [debugInfo] without calling
+  /// this at all. Call this with `true` only while something that reads the
+  /// world-landmark/handedness fields — typically a debug overlay — is
+  /// actually visible, and back to `false` when it's hidden, to avoid
+  /// paying the extraction and cross-thread transfer cost for data nobody
+  /// is using.
+  void setDebugOverlayEnabled(bool enabled) {
+    if (_debugOverlayEnabled == enabled) return;
+    _debugOverlayEnabled = enabled;
+    _setDebugEnabled(enabled);
+  }
+
   /// Tells the worker whether to build worldHands/handedness data at all.
   /// Skips that extraction (and its cross-thread transfer cost) at the
-  /// source when nobody is listening to [debugInfo].
+  /// source when [setDebugOverlayEnabled] hasn't turned it on.
   void _setDebugEnabled(bool enabled) {
-    _debugEnabled = enabled;
     _worker?.postMessage(
       {'type': 'setDebugEnabled', 'enabled': enabled}.jsify()!,
     );
@@ -385,12 +418,24 @@ final class GestureInputSource implements CanvasInputSource {
 
       case 'landmarks':
         _workerBusy = false;
-        final tsMs = obj.getProperty<JSNumber>('timestampMs'.toJS).toDartDouble;
+        // Nullable read — a malformed message from a custom/self-hosted
+        // worker (workerUrl is user-overridable) shouldn't corrupt _dt_/
+        // _prevTimestampMs with garbage from an unchecked non-null cast.
+        final tsMs = obj.getProperty<JSNumber?>('timestampMs'.toJS)?.toDartDouble;
+        if (tsMs == null) {
+          if (kDebugMode) {
+            debugPrint(
+              "[air_pointer] worker 'landmarks' message missing "
+              'timestampMs — skipping frame',
+            );
+          }
+          return;
+        }
         final workerLatencyMs =
             obj.getProperty<JSNumber?>('workerLatencyMs'.toJS)?.toDartDouble ??
                 0;
         final roundTripMs = DateTime.now().millisecondsSinceEpoch - _lastSendMs;
-        final hands = obj.getProperty<JSAny?>('hands'.toJS)?.dartify() as List?;
+        final hands = _jsList(obj, 'hands');
 
         // Latency instrument: log every 60 frames (~2 s at 30 fps).
         // Debug builds only — debugPrint is not stripped in release.
@@ -481,10 +526,12 @@ final class GestureInputSource implements CanvasInputSource {
     }
   }
 
-  // World landmarks, bounding boxes, and handedness are only consumed by
-  // GestureDebugInfo — parsing/computing them (and dartifying the worker's
-  // worldHands/handednesses payload) is skipped entirely when nothing is
-  // listening to debugInfo.
+  // Cheap fields (phase, pinchDistance, dwellProgress, isPointing, ...) are
+  // already computed on the main thread for every frame and are always
+  // included below. World landmarks, bounding boxes, and handedness require
+  // the worker's opt-in extraction (see [setDebugOverlayEnabled]) — parsing
+  // them is skipped, and they read as empty/[Handedness.unknown], whenever
+  // that hasn't been turned on, or when nothing is listening at all.
   void _maybeEmitDebugInfo({
     required JSObject raw,
     required GestureDebugInfo base,
@@ -497,18 +544,23 @@ final class GestureInputSource implements CanvasInputSource {
   }) {
     if (!_debugController.hasListener) return;
 
-    final handednesses =
-        raw.getProperty<JSAny?>('handednesses'.toJS)?.dartify() as List?;
-    final worldHandsRaw =
-        raw.getProperty<JSAny?>('worldHands'.toJS)?.dartify() as List?;
     List<HandLandmarkPoint> worldLms = const [];
     List<HandLandmarkPoint> secondWorldLms = const [];
-    if (worldHandsRaw != null) {
-      if (worldHandsRaw.isNotEmpty) {
-        worldLms = _parseLandmarkList(worldHandsRaw[0] as List<Object?>);
-      }
-      if (worldHandsRaw.length >= 2) {
-        secondWorldLms = _parseLandmarkList(worldHandsRaw[1] as List<Object?>);
+    List<Object?>? handednesses;
+    // _debugWantedAtLastSend guards against the one-frame window where this
+    // reply was sent before setDebugOverlayEnabled(true) reached the
+    // worker — that frame's worldHands/handednesses are empty regardless of
+    // the desired state, so parsing them would just publish stale zeros.
+    if (_debugOverlayEnabled && _debugWantedAtLastSend) {
+      handednesses = _jsList(raw, 'handednesses');
+      final worldHandsRaw = _jsList(raw, 'worldHands');
+      if (worldHandsRaw != null) {
+        if (worldHandsRaw.isNotEmpty) {
+          worldLms = _parseLandmarkList(worldHandsRaw[0] as List<Object?>);
+        }
+        if (worldHandsRaw.length >= 2) {
+          secondWorldLms = _parseLandmarkList(worldHandsRaw[1] as List<Object?>);
+        }
       }
     }
     _debugController.add(GestureDebugInfo(
@@ -531,6 +583,12 @@ final class GestureInputSource implements CanvasInputSource {
       secondHandBoundingBox: _landmarkBounds(secondLms),
     ));
   }
+
+  // Reads and dartifies a JS array-typed property off a worker message.
+  // Shared by 'hands', 'handednesses', and 'worldHands', which are all read
+  // this same way: get the property, dartify it, cast to a Dart List.
+  static List<Object?>? _jsList(JSObject obj, String key) =>
+      obj.getProperty<JSAny?>(key.toJS)?.dartify() as List<Object?>?;
 
   // Shared by both the primary-hand ('hands') and world-space ('worldHands')
   // landmark payloads — both are lists of {x,y,z,visibility} maps.
@@ -595,6 +653,10 @@ final class GestureInputSource implements CanvasInputSource {
         msg.setProperty('frame'.toJS, bitmap);
         msg.setProperty('timestampMs'.toJS, tsMs.toJS);
 
+        // Snapshot right before the send — postMessage calls are ordered, so
+        // this exactly matches what the worker's debug flag will be for the
+        // 'detect' message about to be dispatched (see _debugWantedAtLastSend).
+        _debugWantedAtLastSend = _debugOverlayEnabled;
         _lastSendMs = DateTime.now().millisecondsSinceEpoch;
         _worker!.postMessage(msg, [bitmap as JSObject].toJS);
       },

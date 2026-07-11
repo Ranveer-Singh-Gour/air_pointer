@@ -39,3 +39,14 @@ jobs:
       - name: Build example (web)
         working-directory: example
         run: flutter build web --no-pub
+
+      - name: Install app dependencies
+        working-directory: app
+        run: flutter pub get
+
+      # Static analysis only — app/ is a macOS-only product (native Vision
+      # framework + CoreGraphics FFI), so `flutter build macos` needs a
+      # macos-latest runner and isn't run in this ubuntu-latest job.
+      - name: Analyze app
+        working-directory: app
+        run: flutter analyze

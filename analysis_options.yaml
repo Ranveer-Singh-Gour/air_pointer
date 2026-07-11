@@ -4,6 +4,10 @@ analyzer:
   exclude:
     - '**/.dart_tool/**'
     - '**/build/**'
+    # app/ is a separate Flutter package (its own pubspec.yaml, own
+    # dependencies) — like example/, it's out of scope for the root
+    # package's quality gate; see app/README.md and CLAUDE.md.
+    - 'app/**'
   language:
     strict-casts: true
     strict-inference: true

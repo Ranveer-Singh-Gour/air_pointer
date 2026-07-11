@@ -1,7 +1,12 @@
+import 'dart:async';
 import 'dart:ffi';
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:ffi/ffi.dart';
+
+import '../cursor/system_shortcut.dart';
+import 'cursor_backend.dart';
 
 /// Direct `dart:ffi` bindings into CoreGraphics/ApplicationServices — no
 /// Swift/MethodChannel round trip. These are plain C symbols in system
@@ -9,8 +14,8 @@ import 'package:ffi/ffi.dart';
 /// `DynamicLibrary.process()` with no linking step. Keeps the click/drag
 /// state machine (`SystemCursorSink`) in Dart alongside the rest of this
 /// package's logic, and avoids per-event channel overhead at 30-60Hz.
-class SystemCursorFfi {
-  SystemCursorFfi._() {
+class MacosCursorBackend implements CursorBackend {
+  MacosCursorBackend() {
     final lib = DynamicLibrary.process();
 
     _cgEventCreateMouseEvent = lib.lookupFunction<_CGEventCreateMouseEventNative, _CGEventCreateMouseEventDart>(
@@ -36,8 +41,6 @@ class SystemCursorFfi {
     );
     _cgEventSetFlags = lib.lookupFunction<_CGEventSetFlagsNative, _CGEventSetFlagsDart>('CGEventSetFlags');
   }
-
-  static final SystemCursorFfi instance = SystemCursorFfi._();
 
   late final _CGEventCreateMouseEventDart _cgEventCreateMouseEvent;
   late final _CGEventCreateScrollWheelEventDart _cgEventCreateScrollWheelEvent;
@@ -71,20 +74,22 @@ class SystemCursorFfi {
 
   // Virtual keycodes (Carbon HIToolbox/Events.h) — arrows only, this app
   // never posts character keys.
-  static const int kVkLeftArrow = 0x7B;
-  static const int kVkRightArrow = 0x7C;
-  static const int kVkDownArrow = 0x7D;
-  static const int kVkUpArrow = 0x7E;
+  static const int _kVkLeftArrow = 0x7B;
+  static const int _kVkRightArrow = 0x7C;
+  static const int _kVkDownArrow = 0x7D;
+  static const int _kVkUpArrow = 0x7E;
 
   /// Whether this process is trusted for Accessibility (required for
-  /// [post]/[scroll] to have any effect — `CGEventPost` silently no-ops
-  /// otherwise). No prompting side effect; direct the user to
+  /// [mouseDown]/[scroll]/etc. to have any effect — `CGEventPost` silently
+  /// no-ops otherwise). No prompting side effect; direct the user to
   /// System Settings > Privacy & Security > Accessibility if this is false
   /// (see `PermissionsChannel.openAccessibilitySettings` on the Swift side).
-  bool get isAccessibilityTrusted => _axIsProcessTrusted();
+  @override
+  bool get isTrusted => _axIsProcessTrusted();
 
   /// Bounds of the main display, in the same coordinate space `CGEventPost`
-  /// expects for mouse positions.
+  /// expects for mouse positions. Used directly by the corner-test debug
+  /// screen (single-display sanity check, not part of [CursorBackend]).
   Rect get mainDisplayBounds {
     final id = _cgMainDisplayID();
     final rect = _cgDisplayBounds(id);
@@ -100,6 +105,7 @@ class SystemCursorFfi {
   /// placement will be off by exactly that offset on any non-trivial
   /// monitor arrangement. Falls back to [mainDisplayBounds] if the display
   /// list can't be read.
+  @override
   Rect get combinedDisplayBounds {
     const maxDisplays = 16;
     final ids = calloc<Uint32>(maxDisplays);
@@ -131,15 +137,19 @@ class SystemCursorFfi {
   }
 
   /// Moves the cursor to [position] without any button pressed.
+  @override
   void moveTo(Offset position) => _postMouseEvent(_kCGEventMouseMoved, position);
 
   /// Presses the left mouse button down at [position].
+  @override
   void mouseDown(Offset position) => _postMouseEvent(_kCGEventLeftMouseDown, position);
 
   /// Moves the cursor to [position] while the left mouse button is held.
+  @override
   void mouseDragged(Offset position) => _postMouseEvent(_kCGEventLeftMouseDragged, position);
 
   /// Releases the left mouse button at [position].
+  @override
   void mouseUp(Offset position) => _postMouseEvent(_kCGEventLeftMouseUp, position);
 
   /// Posts a vertical scroll-wheel event. Positive [deltaY] scrolls up.
@@ -152,19 +162,18 @@ class SystemCursorFfi {
   /// integer argument identically either way. This is a widely used pattern
   /// for calling this specific API from FFI, not a general variadic
   /// workaround.
-  void scroll(double deltaY, {bool cmdModifier = false}) {
+  @override
+  void scroll(double deltaY, {bool zoomModifier = false}) {
     final event = _cgEventCreateScrollWheelEvent(nullptr, _kCGScrollEventUnitPixel, 1, deltaY.round());
     if (event == nullptr) return;
-    if (cmdModifier) _cgEventSetFlags(event, _kCGEventFlagMaskCommand);
+    if (zoomModifier) _cgEventSetFlags(event, _kCGEventFlagMaskCommand);
     _cgEventPost(_kCGHIDEventTap, event);
     _cfRelease(event.cast());
   }
 
-  /// Posts a key-down then key-up for [keyCode] (one of the `kVK_*`
-  /// constants) with [controlModifier] optionally held — used to approximate
-  /// gestures macOS has no public synthetic-event API for (space-switching,
-  /// Mission Control) via their built-in keyboard shortcuts instead.
-  void postKeyPress(int keyCode, {bool controlModifier = false}) {
+  /// Posts a key-down then key-up for [keyCode] (one of the `_kVk*`
+  /// constants) with [controlModifier] optionally held.
+  void _postKeyPress(int keyCode, {bool controlModifier = false}) {
     final flags = controlModifier ? _kCGEventFlagMaskControl : 0;
     final down = _cgEventCreateKeyboardEvent(nullptr, keyCode, true);
     if (down != nullptr) {
@@ -178,6 +187,27 @@ class SystemCursorFfi {
       _cgEventPost(_kCGHIDEventTap, up);
       _cfRelease(up.cast());
     }
+  }
+
+  @override
+  void triggerShortcut(SystemShortcut shortcut) {
+    switch (shortcut) {
+      case SystemShortcut.missionControl:
+        _postKeyPress(_kVkUpArrow, controlModifier: true);
+      case SystemShortcut.appExpose:
+        _postKeyPress(_kVkDownArrow, controlModifier: true);
+      case SystemShortcut.spaceLeft:
+        _postKeyPress(_kVkLeftArrow, controlModifier: true);
+      case SystemShortcut.spaceRight:
+        _postKeyPress(_kVkRightArrow, controlModifier: true);
+    }
+  }
+
+  /// `open -a` is the standard way to launch an app bundle by path without
+  /// needing its bundle identifier.
+  @override
+  void openApp(String path) {
+    unawaited(Process.run('open', ['-a', path]));
   }
 }
 

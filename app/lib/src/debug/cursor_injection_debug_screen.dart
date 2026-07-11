@@ -5,11 +5,14 @@ import 'package:flutter/material.dart';
 
 import '../cursor/system_cursor_sink.dart';
 import '../native/accessibility_permission.dart';
-import '../native/system_cursor_ffi.dart';
+import '../native/macos_cursor_backend.dart';
 
-/// Stage 3 verification screen — NOT part of the shipping app.
+/// Stage 3 verification screen — NOT part of the shipping app. macOS-only,
+/// same as the pipeline it exercises (`MacosCursorBackend` directly, not
+/// the cross-platform `CursorBackend` interface — this is a debug tool for
+/// the CGEvent injection specifically, not a general-purpose one).
 ///
-/// Exercises `SystemCursorFfi`/`SystemCursorSink` independently of the
+/// Exercises `MacosCursorBackend`/`SystemCursorSink` independently of the
 /// gesture pipeline, per the plan's Stage 3:
 /// - Corner buttons resolve the coordinate-origin question empirically
 ///   (does `moveTo` land where expected, not just where CGRect math says).
@@ -25,7 +28,7 @@ class CursorInjectionDebugScreen extends StatefulWidget {
 }
 
 class _CursorInjectionDebugScreenState extends State<CursorInjectionDebugScreen> {
-  final _ffi = SystemCursorFfi.instance;
+  final _ffi = MacosCursorBackend();
   final _fakeEvents = StreamController<PointerInputEvent>.broadcast();
   late final _sink = SystemCursorSink(_fakeEvents.stream);
 
@@ -68,7 +71,7 @@ class _CursorInjectionDebugScreenState extends State<CursorInjectionDebugScreen>
 
   @override
   Widget build(BuildContext context) {
-    final trusted = _ffi.isAccessibilityTrusted;
+    final trusted = _ffi.isTrusted;
     final bounds = _bounds;
     return Scaffold(
       backgroundColor: const Color(0xFF0D0D0F),

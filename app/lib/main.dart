@@ -13,7 +13,7 @@ import 'src/debug/debug_tools_screen.dart';
 import 'src/native/camera_permission.dart';
 import 'src/native/launch_at_login.dart';
 import 'src/native/panic_hotkey.dart';
-import 'src/native/system_cursor_ffi.dart';
+import 'src/native/cursor_backend.dart';
 import 'src/onboarding/onboarding_screen.dart';
 import 'src/settings/settings_screen.dart';
 import 'src/storage/app_settings_store.dart';
@@ -95,11 +95,8 @@ class _AirPointerAppState extends State<AirPointerApp> with WindowListener {
     final actions = <RecognizedGesture, GestureAction>{};
     for (final gesture in RecognizedGesture.values) {
       if (gesture == RecognizedGesture.none) continue;
-      final id = await store.loadGestureAction(gesture);
-      if (id == null) continue;
-      for (final action in GestureAction.values) {
-        if (action.name == id) actions[gesture] = action;
-      }
+      final action = await store.loadGestureAction(gesture);
+      if (action != null) actions[gesture] = action;
     }
     if (!mounted) return;
     setState(() {
@@ -139,7 +136,7 @@ class _AirPointerAppState extends State<AirPointerApp> with WindowListener {
   }
 
   bool get _permissionsReady =>
-      _cameraStatus == 'authorized' && SystemCursorFfi.instance.isAccessibilityTrusted;
+      _cameraStatus == 'authorized' && CursorBackend.instance.isTrusted;
 
   /// Fully stops tracking (camera off) — the same effect as toggling
   /// "Cursor control: Off" from the tray, so the app status screen, tray

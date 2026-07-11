@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../cursor/gesture_action_executor.dart';
 import '../cursor/gesture_session_controller.dart';
+import '../cursor/system_shortcut.dart';
 import '../native/launch_at_login.dart';
 import '../native/panic_hotkey.dart';
 import '../storage/app_settings_store.dart';
@@ -63,14 +64,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     unawaited(_load());
   }
 
-  static GestureAction? _actionFromId(String? id) {
-    if (id == null) return null;
-    for (final action in GestureAction.values) {
-      if (action.name == id) return action;
-    }
-    return null;
-  }
-
   Future<void> _load() async {
     final store = widget.store;
     final launchAtLogin = await LaunchAtLogin.isEnabled();
@@ -80,8 +73,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final panic = await store.loadPanicHotkeyEnabled();
     final actions = <RecognizedGesture, GestureAction?>{};
     for (final gesture in _bindableGestures) {
-      final id = await store.loadGestureAction(gesture);
-      actions[gesture] = _actionFromId(id);
+      actions[gesture] = await store.loadGestureAction(gesture);
     }
     if (!mounted) return;
     setState(() {
@@ -131,8 +123,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _setGestureAction(RecognizedGesture gesture, GestureAction? action) async {
     setState(() => _gestureActions[gesture] = action);
-    await widget.store.saveGestureAction(gesture, action?.name);
+    await widget.store.saveGestureAction(gesture, action);
     widget.getActiveController()?.setGestureAction(gesture, action);
+  }
+
+  Future<void> _editGestureAction(RecognizedGesture gesture) async {
+    final result = await showDialog<_EditResult>(
+      context: context,
+      builder: (_) => _GestureActionEditDialog(initial: _gestureActions[gesture]),
+    );
+    if (result != null) await _setGestureAction(gesture, result.action);
   }
 
   @override
@@ -197,7 +197,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const Padding(
             padding: EdgeInsets.only(bottom: 12),
             child: Text(
-              'Bind a hand pose to a system action. Unbound gestures do nothing.',
+              'Bind a hand pose to a system shortcut, an app to open, or a '
+              'command to run. Unbound gestures do nothing.',
               style: TextStyle(color: Colors.white38, fontSize: 12),
             ),
           ),
@@ -205,7 +206,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             _GestureActionRow(
               gesture: gesture,
               value: _gestureActions[gesture],
-              onChanged: (action) => _setGestureAction(gesture, action),
+              onTap: () => _editGestureAction(gesture),
             ),
         ],
       ),
@@ -268,51 +269,193 @@ class _SwitchTile extends StatelessWidget {
       );
 }
 
+const _gestureLabels = {
+  RecognizedGesture.closedFist: 'Closed fist ✊',
+  RecognizedGesture.openPalm: 'Open palm 🖐',
+  RecognizedGesture.pointingUp: 'Pointing up ☝',
+  RecognizedGesture.thumbUp: 'Thumbs up 👍',
+  RecognizedGesture.thumbDown: 'Thumbs down 👎',
+  RecognizedGesture.victory: 'Victory ✌',
+  RecognizedGesture.iLoveYou: 'I love you 🤙',
+};
+
 class _GestureActionRow extends StatelessWidget {
   const _GestureActionRow({
     required this.gesture,
     required this.value,
-    required this.onChanged,
+    required this.onTap,
   });
 
   final RecognizedGesture gesture;
   final GestureAction? value;
-  final ValueChanged<GestureAction?> onChanged;
-
-  static const _labels = {
-    RecognizedGesture.closedFist: 'Closed fist ✊',
-    RecognizedGesture.openPalm: 'Open palm 🖐',
-    RecognizedGesture.pointingUp: 'Pointing up ☝',
-    RecognizedGesture.thumbUp: 'Thumbs up 👍',
-    RecognizedGesture.thumbDown: 'Thumbs down 👎',
-    RecognizedGesture.victory: 'Victory ✌',
-    RecognizedGesture.iLoveYou: 'I love you 🤙',
-  };
+  final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(_labels[gesture] ?? gesture.name, style: const TextStyle(color: Colors.white, fontSize: 13)),
-            ),
-            DropdownButton<GestureAction?>(
-              value: value,
-              dropdownColor: const Color(0xFF1C1C1E),
-              style: const TextStyle(color: Colors.white, fontSize: 12),
-              underline: Container(height: 1, color: Colors.white24),
-              hint: const Text('None', style: TextStyle(color: Colors.white38, fontSize: 12)),
-              items: [
-                const DropdownMenuItem<GestureAction?>(
-                  child: Text('None', style: TextStyle(color: Colors.white38)),
+  Widget build(BuildContext context) => InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  _gestureLabels[gesture] ?? gesture.name,
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
                 ),
-                for (final action in GestureAction.values)
-                  DropdownMenuItem<GestureAction?>(value: action, child: Text(action.label)),
+              ),
+              Text(
+                value?.label ?? 'None',
+                style: TextStyle(color: value == null ? Colors.white38 : Colors.white70, fontSize: 12),
+              ),
+              const SizedBox(width: 6),
+              const Icon(Icons.chevron_right, color: Colors.white38, size: 16),
+            ],
+          ),
+        ),
+      );
+}
+
+// ── Gesture-action edit dialog ──────────────────────────────────────────────
+
+enum _Kind { none, shortcut, openApp, runCommand }
+
+class _EditResult {
+  const _EditResult(this.action);
+  final GestureAction? action;
+}
+
+class _GestureActionEditDialog extends StatefulWidget {
+  const _GestureActionEditDialog({this.initial});
+  final GestureAction? initial;
+
+  @override
+  State<_GestureActionEditDialog> createState() => _GestureActionEditDialogState();
+}
+
+class _GestureActionEditDialogState extends State<_GestureActionEditDialog> {
+  late _Kind _kind = switch (widget.initial) {
+    null => _Kind.none,
+    SystemShortcutAction() => _Kind.shortcut,
+    OpenAppAction() => _Kind.openApp,
+    RunCommandAction() => _Kind.runCommand,
+  };
+  late SystemShortcut _shortcut =
+      widget.initial is SystemShortcutAction ? (widget.initial! as SystemShortcutAction).shortcut : SystemShortcut.values.first;
+  late final _appPathController =
+      TextEditingController(text: widget.initial is OpenAppAction ? (widget.initial! as OpenAppAction).appPath : '');
+  late final _commandController = TextEditingController(
+      text: widget.initial is RunCommandAction ? (widget.initial! as RunCommandAction).executable : '');
+  late final _argsController = TextEditingController(
+      text: widget.initial is RunCommandAction ? (widget.initial! as RunCommandAction).arguments.join(' ') : '');
+
+  @override
+  void dispose() {
+    _appPathController.dispose();
+    _commandController.dispose();
+    _argsController.dispose();
+    super.dispose();
+  }
+
+  GestureAction? _buildAction() => switch (_kind) {
+        _Kind.none => null,
+        _Kind.shortcut => SystemShortcutAction(_shortcut),
+        _Kind.openApp => _appPathController.text.trim().isEmpty ? null : OpenAppAction(_appPathController.text.trim()),
+        _Kind.runCommand => _commandController.text.trim().isEmpty
+            ? null
+            : RunCommandAction(
+                _commandController.text.trim(),
+                _argsController.text.trim().split(RegExp(r'\s+')).where((s) => s.isNotEmpty).toList(),
+              ),
+      };
+
+  @override
+  Widget build(BuildContext context) => Dialog(
+        backgroundColor: const Color(0xFF1C1C1E),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: SizedBox(
+            width: 300,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Gesture action', style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 16),
+                DropdownButton<_Kind>(
+                  isExpanded: true,
+                  value: _kind,
+                  dropdownColor: const Color(0xFF1C1C1E),
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                  items: const [
+                    DropdownMenuItem(value: _Kind.none, child: Text('None')),
+                    DropdownMenuItem(value: _Kind.shortcut, child: Text('System shortcut')),
+                    DropdownMenuItem(value: _Kind.openApp, child: Text('Open an app')),
+                    DropdownMenuItem(value: _Kind.runCommand, child: Text('Run a command')),
+                  ],
+                  onChanged: (kind) => setState(() => _kind = kind ?? _Kind.none),
+                ),
+                const SizedBox(height: 12),
+                ..._buildFields(),
+                const SizedBox(height: 20),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
+                    const SizedBox(width: 8),
+                    FilledButton(
+                      onPressed: () => Navigator.of(context).pop(_EditResult(_buildAction())),
+                      child: const Text('Save'),
+                    ),
+                  ],
+                ),
               ],
-              onChanged: onChanged,
+            ),
+          ),
+        ),
+      );
+
+  List<Widget> _buildFields() => switch (_kind) {
+        _Kind.none => const [],
+        _Kind.shortcut => [
+            DropdownButton<SystemShortcut>(
+              isExpanded: true,
+              value: _shortcut,
+              dropdownColor: const Color(0xFF1C1C1E),
+              style: const TextStyle(color: Colors.white, fontSize: 13),
+              items: [
+                for (final shortcut in SystemShortcut.values)
+                  DropdownMenuItem(value: shortcut, child: Text(shortcut.label)),
+              ],
+              onChanged: (shortcut) => setState(() => _shortcut = shortcut ?? _shortcut),
             ),
           ],
+        _Kind.openApp => [
+            _DialogTextField(controller: _appPathController, hint: '/Applications/Safari.app'),
+          ],
+        _Kind.runCommand => [
+            _DialogTextField(controller: _commandController, hint: '/usr/bin/say'),
+            const SizedBox(height: 8),
+            _DialogTextField(controller: _argsController, hint: 'Arguments (space-separated)'),
+          ],
+      };
+}
+
+class _DialogTextField extends StatelessWidget {
+  const _DialogTextField({required this.controller, required this.hint});
+  final TextEditingController controller;
+  final String hint;
+
+  @override
+  Widget build(BuildContext context) => TextField(
+        controller: controller,
+        style: const TextStyle(color: Colors.white, fontSize: 13),
+        decoration: InputDecoration(
+          hintText: hint,
+          hintStyle: const TextStyle(color: Colors.white24, fontSize: 12),
+          isDense: true,
+          enabledBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
+          focusedBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Colors.white70)),
         ),
       );
 }

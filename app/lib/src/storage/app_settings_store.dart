@@ -1,6 +1,8 @@
 import 'package:air_pointer/air_pointer.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../cursor/gesture_action_executor.dart';
+
 /// Persists calibration and user-tunable settings across app restarts.
 /// Backed by `shared_preferences` (NSUserDefaults on macOS) — a handful of
 /// scalar values, not worth a file/JSON layer.
@@ -77,19 +79,21 @@ class AppSettingsStore {
     await (await _prefs).setBool(_kPanicHotkeyEnabled, enabled);
   }
 
-  /// Maps a [RecognizedGesture] (by enum name) to a user-chosen action id,
-  /// e.g. `'missionControl'` — see `GestureActionExecutor`. Absent entries
-  /// mean "no action bound."
-  Future<String?> loadGestureAction(RecognizedGesture gesture) async =>
-      (await _prefs).getString('$_kGestureActionPrefix${gesture.name}');
+  /// Maps a [RecognizedGesture] to a user-chosen [GestureAction], stored via
+  /// [GestureAction.encode]. Absent (or malformed — see
+  /// [GestureAction.decode]) entries mean "no action bound."
+  Future<GestureAction?> loadGestureAction(RecognizedGesture gesture) async {
+    final encoded = (await _prefs).getString('$_kGestureActionPrefix${gesture.name}');
+    return encoded == null ? null : GestureAction.decode(encoded);
+  }
 
-  Future<void> saveGestureAction(RecognizedGesture gesture, String? actionId) async {
+  Future<void> saveGestureAction(RecognizedGesture gesture, GestureAction? action) async {
     final prefs = await _prefs;
     final key = '$_kGestureActionPrefix${gesture.name}';
-    if (actionId == null) {
+    if (action == null) {
       await prefs.remove(key);
     } else {
-      await prefs.setString(key, actionId);
+      await prefs.setString(key, action.encode());
     }
   }
 }

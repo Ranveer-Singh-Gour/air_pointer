@@ -1,13 +1,14 @@
 import 'package:air_pointer/air_pointer.dart';
 
-import '../native/system_cursor_ffi.dart';
-import '../native/vision_landmark_provider.dart';
+import '../native/cursor_backend.dart';
+import '../native/landmark_provider_factory.dart';
 import 'gesture_action_executor.dart';
 import 'system_cursor_sink.dart';
 
-/// Owns the `GestureInputSource` (Vision-backed) and the `SystemCursorSink`
-/// subscription lifecycle. `canvasSize` is set from every active display's
-/// combined bounds (see `SystemCursorFfi.combinedDisplayBounds`), so
+/// Owns the `GestureInputSource` and the `SystemCursorSink` subscription
+/// lifecycle. Uses `createLandmarkProvider()` to pick a real (macOS) or stub
+/// (Windows) hand-tracking backend. `canvasSize` is set from every active
+/// display's combined bounds (see `CursorBackend.combinedDisplayBounds`), so
 /// `PointerInputEvent.position` values span the whole desktop, not just the
 /// main display.
 ///
@@ -24,13 +25,13 @@ class GestureSessionController {
     Map<RecognizedGesture, GestureAction> gestureActions = const {},
   })  : gestureActions = Map.of(gestureActions),
         source = GestureInputSource(
-          landmarkProvider: VisionLandmarkProvider(),
+          landmarkProvider: createLandmarkProvider(),
           scrollEnabled: true,
           maxHands: twoHandZoomEnabled ? 2 : 1,
           swipeThreshold: swipeGesturesEnabled ? kDefaultSwipeThreshold : 0.0,
           onError: onError,
         ) {
-    source.updateCanvasSize(SystemCursorFfi.instance.combinedDisplayBounds.size);
+    source.updateCanvasSize(CursorBackend.instance.combinedDisplayBounds.size);
   }
 
   /// Screen-pixels-per-second swipe speed that counts as a swipe — matches

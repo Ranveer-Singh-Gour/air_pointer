@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../native/accessibility_permission.dart';
 import '../native/camera_permission.dart';
-import '../native/system_cursor_ffi.dart';
+import '../native/cursor_backend.dart';
 
 /// First-run permission flow: camera, then Accessibility, each with its own
 /// explanatory copy shown *before* triggering the OS prompt for it — the
@@ -25,15 +25,23 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   Future<void> _requestCamera() async {
     final granted = await CameraPermission.request();
     if (!mounted) return;
-    if (granted) {
-      setState(() => _step = _Step.accessibilityExplain);
-    } else {
+    if (!granted) {
       setState(() => _step = _Step.cameraDenied);
+      return;
+    }
+    // `isTrusted` is unconditionally true on Windows (no Accessibility-style
+    // grant needed for SendInput) and may already be true on macOS from a
+    // previous session — either way, skip a step that has nothing left to
+    // ask for instead of showing macOS-specific copy that wouldn't apply.
+    if (CursorBackend.instance.isTrusted) {
+      widget.onComplete();
+    } else {
+      setState(() => _step = _Step.accessibilityExplain);
     }
   }
 
   void _checkAccessibility() {
-    if (SystemCursorFfi.instance.isAccessibilityTrusted) {
+    if (CursorBackend.instance.isTrusted) {
       widget.onComplete();
     } else {
       setState(() {}); // re-render the "not yet granted" hint

@@ -22,6 +22,22 @@ enum _Step { cameraExplain, cameraDenied, accessibilityExplain }
 class _OnboardingScreenState extends State<OnboardingScreen> {
   _Step _step = _Step.cameraExplain;
 
+  /// `CursorBackend.instance` is constructed lazily on first access — this
+  /// is that first access point, the first real exercise of its `dart:ffi`
+  /// symbol lookups in the whole app's lifecycle (nothing before onboarding
+  /// completes ever forces it, since `_permissionsReady`'s `&&` short-
+  /// circuits before reaching it while camera isn't authorized yet). If a
+  /// lookup fails, surface it loudly instead of leaving the onboarding
+  /// button looking like it silently did nothing.
+  bool _isTrustedOrFalse() {
+    try {
+      return CursorBackend.instance.isTrusted;
+    } catch (e, st) {
+      debugPrint('[air_pointer_app] CursorBackend.instance failed: $e\n$st');
+      return false;
+    }
+  }
+
   Future<void> _requestCamera() async {
     final granted = await CameraPermission.request();
     if (!mounted) return;
@@ -33,7 +49,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     // grant needed for SendInput) and may already be true on macOS from a
     // previous session — either way, skip a step that has nothing left to
     // ask for instead of showing macOS-specific copy that wouldn't apply.
-    if (CursorBackend.instance.isTrusted) {
+    if (_isTrustedOrFalse()) {
       widget.onComplete();
     } else {
       setState(() => _step = _Step.accessibilityExplain);
@@ -41,7 +57,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   }
 
   void _checkAccessibility() {
-    if (CursorBackend.instance.isTrusted) {
+    if (_isTrustedOrFalse()) {
       widget.onComplete();
     } else {
       setState(() {}); // re-render the "not yet granted" hint

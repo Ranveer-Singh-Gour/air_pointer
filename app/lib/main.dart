@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:air_pointer/air_pointer.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -11,15 +12,27 @@ import 'src/cursor/gesture_action_executor.dart';
 import 'src/cursor/gesture_session_controller.dart';
 import 'src/debug/debug_tools_screen.dart';
 import 'src/native/camera_permission.dart';
+import 'src/native/cursor_backend.dart';
 import 'src/native/launch_at_login.dart';
 import 'src/native/panic_hotkey.dart';
-import 'src/native/cursor_backend.dart';
 import 'src/onboarding/onboarding_screen.dart';
 import 'src/settings/settings_screen.dart';
 import 'src/storage/app_settings_store.dart';
 import 'src/tray/tray_controller.dart';
 
 Future<void> main() async {
+  // Uncaught errors in event-handler callbacks (button taps, etc.) are
+  // otherwise easy to lose — Flutter's default zone reports them to stderr,
+  // but under `flutter run` that can scroll past unnoticed, and a thrown
+  // error partway through a callback (e.g. `setState` never reached)
+  // otherwise looks indistinguishable from a UI that's just silently
+  // hanging. Print loudly and clearly instead.
+  runZonedGuarded(_run, (error, stack) {
+    debugPrint('[air_pointer_app] UNCAUGHT: $error\n$stack');
+  });
+}
+
+Future<void> _run() async {
   WidgetsFlutterBinding.ensureInitialized();
   await windowManager.ensureInitialized();
   await LaunchAtLogin.setUp();
@@ -31,9 +44,25 @@ Future<void> main() async {
     titleBarStyle: TitleBarStyle.hidden,
   );
   unawaited(windowManager.waitUntilReadyToShow(windowOptions, () async {
-    // No window flash on launch — this is a menu-bar-only app until the
-    // user opens it from the tray.
-    await windowManager.hide();
+    // No window flash on launch in the shipped app — it's menu-bar-only
+    // until opened from the tray. Under `flutter run` (kDebugMode), show
+    // and activate it instead: hiding it immediately there reads as "the
+    // app just crashed" rather than "it's running in the background,"
+    // since there's no other on-screen signal that launch succeeded.
+    //
+    // `show()` (not just leaving the window as `waitUntilReadyToShow`
+    // constructed it) matters specifically because it's the call that
+    // triggers `NSApp.activate(ignoringOtherApps: true)` on the native
+    // side — an accessory-policy app (no Dock icon) never becomes the
+    // frontmost/key app on its own just because a window exists. Without
+    // this, the window is technically visible but never focused, so
+    // clicks and the system permission dialogs that follow can land on
+    // the wrong app.
+    if (kDebugMode) {
+      await windowManager.show();
+    } else {
+      await windowManager.hide();
+    }
   }));
 
   runApp(const AirPointerApp());
@@ -273,7 +302,14 @@ class _AirPointerAppState extends State<AirPointerApp> with WindowListener {
     await _refreshCameraStatus();
     setState(() => _showOnboarding = false);
     await _enableTracking(cursorControl: true);
-    await windowManager.hide();
+    // Deliberately NOT hiding here (unlike the launch-time hide in `main()`)
+    // — right after granting two OS permissions, a first-time user needs to
+    // see *something* confirming it worked. `_showOnboarding = false` above
+    // already transitions `build()` to `AppStatusScreen` ("Cursor control
+    // is on"); hiding the window immediately after made a successful setup
+    // indistinguishable from a hang, since nothing else signals success.
+    // The window can still be dismissed normally (its close button hides
+    // it, same as any other window in this app — see `onWindowClose`).
   }
 
   @override

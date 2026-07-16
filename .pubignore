@@ -2,3 +2,9 @@
 # the published air_pointer library. Depends on air_pointer via a local path
 # dependency; see app/README.md.
 app/
+
+# Build artifacts and coverage output — gitignored, but pub publish's git-
+# tracked-files listing isn't excluding them, so state it explicitly.
+build/
+coverage/
+example/build/
